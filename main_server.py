@@ -174,6 +174,10 @@ except Exception as e:
 
 from keras.models import load_model
 
+from keras.models import load_model
+import io
+import logging
+
 def get_model_architecture() -> Optional[object]:
     """
     Load model architecture from blob storage directly without using file system or caching.
@@ -183,11 +187,14 @@ def get_model_architecture() -> Optional[object]:
         container_client = blob_service_client_client.get_container_client(CLIENT_CONTAINER_NAME)
         blob_client = container_client.get_blob_client(ARCH_BLOB_NAME)
 
-        # Download architecture file directly into memory and load model
+        # Download architecture file directly into memory
         arch_data = blob_client.download_blob().readall()
 
-        # Load the model directly from the byte data without writing to disk
-        model = load_model(arch_data, compile=False)
+        # Wrap byte data in a BytesIO object (acting as an in-memory file)
+        arch_data_io = io.BytesIO(arch_data)
+
+        # Load the model directly from the in-memory byte data (file-like object)
+        model = load_model(arch_data_io, compile=False)
 
         return model
 
@@ -195,6 +202,7 @@ def get_model_architecture() -> Optional[object]:
         # Log the error properly for debugging purposes
         logging.error(f"Error loading model: {str(e)}")
         return None
+
 
 
 def load_weights_from_blob(
