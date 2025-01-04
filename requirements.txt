@@ -62,3 +62,4 @@ websockets==13.1
 werkzeug==3.0.6
 wrapt==1.14.1
 zipp==3.20.2
+sqlalchemy>=1.4
