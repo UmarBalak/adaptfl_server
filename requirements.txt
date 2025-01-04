@@ -5,4 +5,4 @@ tensorflow==2.13.0
 azure-storage-blob==12.15.0
 apscheduler==3.9.1
 python-dotenv==1.0.0
-sqlalchemy==2.1.0
+sqlalchemy==1.4.0
