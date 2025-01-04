@@ -87,17 +87,6 @@ def get_db():
     finally:
         db.close()
 
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("server.log"),
-        logging.StreamHandler()
-    ]
-)
-
 class ConnectionManager:
     def __init__(self):
         self.active_connections: Dict[str, WebSocket] = {}
@@ -107,21 +96,16 @@ class ConnectionManager:
         await websocket.accept()
         self.active_connections[client_id] = websocket
 
-        logging.info(f"Client {client_id} connected. Total connections: {len(self.active_connections)}")
-
     async def disconnect(self, client_id: str):
         if client_id in self.active_connections:
             del self.active_connections[client_id]
-            logging.info(f"Client {client_id} disconnected. Total connections: {len(self.active_connections)}")
 
     async def broadcast_model_update(self, message: str):
         disconnected_clients = []
         for client_id, connection in self.active_connections.items():
             try:
                 await connection.send_text(message)
-                logging.info(f"Update notification sent to client {client_id}")
             except Exception as e:
-                logging.error(f"Failed to send update to client {client_id}: {e}")
                 disconnected_clients.append(client_id)
         
         # Clean up disconnected clients
@@ -141,7 +125,6 @@ ARCH_BLOB_NAME = "model_architecture.keras"
 CLIENT_NOTIFICATION_URL = os.getenv("CLIENT_NOTIFICATION_URL")
 
 if not CLIENT_ACCOUNT_URL or not SERVER_ACCOUNT_URL:
-    logging.error("SAS url environment variable is missing.")
     raise ValueError("Missing required environment variable: SAS url")
 
 
@@ -149,7 +132,6 @@ try:
     blob_service_client_client = BlobServiceClient(account_url=CLIENT_ACCOUNT_URL)
     blob_service_client_server = BlobServiceClient(account_url=SERVER_ACCOUNT_URL)
 except Exception as e:
-    logging.error(f"Failed to initialize Azure Blob Service: {e}")
     raise
 
 
@@ -160,9 +142,7 @@ def get_model_architecture() -> Optional[object]:
     """
     try:
         container_client = blob_service_client_client.get_container_client(CLIENT_CONTAINER_NAME)
-        logging.info("Container client initialized successfully.")
         blob_client = container_client.get_blob_client(ARCH_BLOB_NAME)
-        logging.info("Blob client initialized successfully.")
         
         # Download architecture file to memory
         arch_data = blob_client.download_blob().readall()
@@ -176,12 +156,10 @@ def get_model_architecture() -> Optional[object]:
         return model
     
     except ImportError as e:
-        logging.error(f"Import error while loading model architecture: {e}")
         if 'temp_path' in locals() and os.path.exists(temp_path):
             os.unlink(temp_path)
         return None
     except Exception as e:
-        logging.error(f"Error loading model architecture: {e}")
         if 'temp_path' in locals() and os.path.exists(temp_path):
             os.unlink(temp_path)
         return None
@@ -280,8 +258,6 @@ def load_weights_from_blob(
                     
                     # Fetch metadata from the blob
                     blob_metadata = blob_client.get_blob_properties().metadata
-                    print("---------------------------------------")
-                    print(blob_metadata)
                     if blob_metadata:
                         # Convert metadata values to appropriate types if necessary
                         num_examples = int(blob_metadata.get('num_examples', 0))
@@ -299,15 +275,11 @@ def load_weights_from_blob(
                     new_last_processed_timestamp = max(new_last_processed_timestamp, timestamp_int)
 
         if not weights_list:
-            logging.info(f"No new weights found since {last_processed_timestamp}.")
             return None, [], [], last_processed_timestamp
         
-        logging.info(f"Loaded weights from {len(weights_list)} files.")
-        print(num_examples_list)
         return weights_list, num_examples_list, loss_list, new_last_processed_timestamp
 
     except Exception as e:
-        logging.error(f"Error loading weights: {e}")
         if 'temp_path' in locals() and os.path.exists(temp_path):
             os.unlink(temp_path)
         return None, [], [], last_processed_timestamp
@@ -332,121 +304,20 @@ def save_weights_to_blob(weights: List[np.ndarray], filename: str, model) -> boo
         with open(temp_path, "rb") as file:
             blob_client.upload_blob(file, overwrite=True)
         
-        logging.info(f"Successfully saved weights to blob: {filename}")
         return True
     except Exception as e:
-        logging.error(f"Error saving weights to blob: {e}")
         return False
     finally:
         if temp_path and os.path.exists(temp_path):
             os.unlink(temp_path)
 
-# def federated_averaging(weights_list):
-#     """
-#     Perform Federated Averaging on a list of model weights.
-
-#     Args:
-#         weights_list (list): List of model weights from clients.
-
-#     Returns:
-#         avg_weights (list): Federated averaged weights.
-#     """
-#     if not weights_list:
-#         logging.error("No weights available for aggregation")
-#         return None
-    
-#     avg_weights = []
-#     for layer_weights in zip(*weights_list):  # Iterate layer-wise
-#         avg_weights.append(np.mean(layer_weights, axis=0))  # Average weights for each layer
-#     logging.info("Federated averaging completed successfully.")
-#     return avg_weights
-
-# def federated_weighted_averaging(weights_list, num_examples_list):
-#     """
-#     Perform Weighted Federated Averaging on a list of model weights.
-
-#     Args:
-#         weights_list (list of list of np.ndarray): List of model weights from clients.
-#         num_examples_list (list of int): List of the number of examples for each client.
-
-#     Returns:
-#         avg_weights (list of np.ndarray): Federated weighted averaged weights.
-#     """
-#     if not weights_list or not num_examples_list:
-#         logging.error("Weights or example counts missing for aggregation.")
-#         return None
-    
-#     # Total number of examples across all clients
-#     total_examples = sum(num_examples_list)
-#     if total_examples == 0:
-#         logging.error("Total examples is zero, cannot perform weighted averaging.")
-#         return None
-
-#     # Initialize averaged weights with the same structure and dtype as the first client's weights
-#     avg_weights = [np.zeros_like(layer, dtype=np.float64) for layer in weights_list[0]]
-
-    
-#     # Perform weighted averaging for each layer
-#     for i, layer_weights in enumerate(zip(*weights_list)):  # Layer-wise aggregation
-#         for client_idx, client_weights in enumerate(layer_weights):
-#             avg_weights[i] += client_weights * (num_examples_list[client_idx] / total_examples)
-    
-#     logging.info("Weighted Federated Averaging completed successfully.")
-#     return avg_weights
-
-# def federated_weighted_averaging(weights_list, num_examples_list, loss_list, alpha=0.8, epsilon=1e-8):
-#     """
-#     Perform Weighted Federated Averaging on a list of model weights, incorporating loss.
-
-#     Args:
-#         weights_list (list of list of np.ndarray): List of model weights from clients.
-#         num_examples_list (list of int): List of the number of examples for each client.
-#         loss_list (list of float): List of model losss for each client.
-#         alpha (float): Weighting factor for combining data size and loss.
-#         epsilon (float): Small constant to avoid division by zero.
-
-#     Returns:
-#         avg_weights (list of np.ndarray): Federated weighted averaged weights.
-#     """
-#     if not weights_list or not num_examples_list or not loss_list:
-#         logging.error("Weights, example counts, or loss values missing for aggregation.")
-#         return None
-    
-#     # Total number of examples across all clients
-#     total_examples = sum(num_examples_list)
-#     if total_examples == 0:
-#         logging.error("Total examples is zero, cannot perform weighted averaging.")
-#         return None
-
-#     # Normalize loss (inverted so lower loss has higher weight)
-#     inverted_loss = [1 / (loss + epsilon) for loss in loss_list]
-#     avg_inverted_loss = sum(inverted_loss) / len(inverted_loss)
-
-#     # Initialize averaged weights with the same structure and dtype as the first client's weights
-#     avg_weights = [np.zeros_like(layer, dtype=np.float64) for layer in weights_list[0]]
-
-#     # Perform weighted averaging for each layer
-#     for i, layer_weights in enumerate(zip(*weights_list)):  # Layer-wise aggregation
-#         for client_idx, client_weights in enumerate(layer_weights):
-#             # Combine data size and loss-based weights
-#             combined_weight = (
-#                 alpha * (num_examples_list[client_idx] / total_examples) +
-#                 (1 - alpha) * (inverted_loss[client_idx] / avg_inverted_loss)
-#             )
-#             avg_weights[i] += client_weights * combined_weight
-    
-#     logging.info("Weighted Federated Averaging with loss adjustment completed successfully.")
-#     return avg_weights
-
 def federated_weighted_averaging(weights_list, num_examples_list, loss_list, alpha=0.7):
     """Perform Weighted Federated Averaging with improved loss weighting."""
     if not weights_list or not num_examples_list or not loss_list:
-        logging.error("Missing inputs for aggregation.")
         return None
     
     total_examples = sum(num_examples_list)
     if total_examples == 0:
-        logging.error("Total examples is zero.")
         return None
 
     # Softmax-based loss weighting
@@ -543,17 +414,13 @@ async def aggregate_weights():
             return {"status": "no_update", "message": "No new weights found", "num_clients": 0}
 
         if not num_examples_list:
-            print("Example counts missing for aggregation")
-            logging.error("Example counts missing for aggregation")
             return None
 
         global_vars['latest_version'] += 1
         filename = get_versioned_filename(global_vars['latest_version'])
 
         # avg_weights = federated_averaging(weights_list)
-        logging.info(f"Aggregating weights from {len(weights_list)} clients")
         avg_weights = federated_weighted_averaging(weights_list, num_examples_list, loss_list)
-        logging.info(f"Aggregation completed.")
         if not avg_weights or not save_weights_to_blob(avg_weights, filename, model):
             raise HTTPException(status_code=500, detail="Failed to save aggregated weights")
 
@@ -624,14 +491,9 @@ def scheduled_aggregate_weights():
     """
     Scheduled task to aggregate weights every minute.
     """
-    logging.info("Scheduled task: Starting weight aggregation process.")
     try:
         asyncio.run(aggregate_weights())
     except Exception as e:
-        logging.error(f"Error during scheduled weight aggregation: {e}")
+        raise
 
 scheduler.start()
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="localhost", port=8000)
