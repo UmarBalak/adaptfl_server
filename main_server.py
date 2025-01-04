@@ -195,7 +195,7 @@ def get_model_architecture() -> Optional[keras.Model]:
             temp_path = temp_file.name
         
         # Load the model from the temporary file
-        model = load_model(temp_path, compile=False)
+        model = keras.models.load_model(temp_path, compile=False)
         
         return model
     
