@@ -314,6 +314,9 @@ def verify_admin(api_key: str):
     if api_key != admin_key:
         raise HTTPException(status_code=403, detail="Unauthorized admin access")
 
+@app.get("/")
+def read_root():
+    return {"message": "Hello, World!"}
    
 # Modified registration endpoint
 @app.post("/register")
