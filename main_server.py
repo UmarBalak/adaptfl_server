@@ -144,65 +144,33 @@ except Exception as e:
 
 
 
-# def get_model_architecture() -> Optional[object]:
-#     """
-#     Load model architecture from blob storage.
-#     """
-#     try:
-#         container_client = blob_service_client_client.get_container_client(CLIENT_CONTAINER_NAME)
-#         blob_client = container_client.get_blob_client(ARCH_BLOB_NAME)
-        
-#         # Download architecture file to memory
-#         arch_data = blob_client.download_blob().readall()
-#         with tempfile.NamedTemporaryFile(suffix='.keras', delete=False) as temp_file:
-#             temp_file.write(arch_data)
-#             temp_path = temp_file.name
-        
-#         model = keras.models.load_model(temp_path, compile=False)
-
-#         os.unlink(temp_path)
-#         return model
-    
-#     except ImportError as e:
-#         if 'temp_path' in locals() and os.path.exists(temp_path):
-#             os.unlink(temp_path)
-#         return None
-#     except Exception as e:
-#         if 'temp_path' in locals() and os.path.exists(temp_path):
-#             os.unlink(temp_path)
-#         return None
-
-from keras.models import load_model
-
-from keras.models import load_model
-import io
-import logging
-
 def get_model_architecture() -> Optional[object]:
     """
-    Load model architecture from blob storage directly without using file system or caching.
+    Load model architecture from blob storage.
     """
     try:
-        # Access the blob service
         container_client = blob_service_client_client.get_container_client(CLIENT_CONTAINER_NAME)
         blob_client = container_client.get_blob_client(ARCH_BLOB_NAME)
-
-        # Download architecture file directly into memory
+        
+        # Download architecture file to memory
         arch_data = blob_client.download_blob().readall()
+        with tempfile.NamedTemporaryFile(suffix='.keras', delete=False) as temp_file:
+            temp_file.write(arch_data)
+            temp_path = temp_file.name
+        
+        model = keras.models.load_model(temp_path, compile=False)
 
-        # Wrap byte data in a BytesIO object (acting as an in-memory file)
-        arch_data_io = io.BytesIO(arch_data)
-
-        # Load the model directly from the in-memory byte data (file-like object)
-        model = load_model(arch_data_io, compile=False)
-
+        os.unlink(temp_path)
         return model
-
-    except Exception as e:
-        # Log the error properly for debugging purposes
-        logging.error(f"Error loading model: {str(e)}")
+    
+    except ImportError as e:
+        if 'temp_path' in locals() and os.path.exists(temp_path):
+            os.unlink(temp_path)
         return None
-
+    except Exception as e:
+        if 'temp_path' in locals() and os.path.exists(temp_path):
+            os.unlink(temp_path)
+        return None
 
 
 def load_weights_from_blob(
