@@ -165,53 +165,6 @@ def get_model_architecture() -> Optional[object]:
         return None
 
 
-# def load_weights_from_blob(
-#     blob_service_client_client: BlobServiceClient,
-#     container_name: str,
-#     model,
-#     last_processed_timestamp: int
-# ) -> Optional[List[np.ndarray]]:
-#     try:
-#         pattern = re.compile(r"client[0-9a-fA-F\-]+_v\d+_(\d{8}_\d{6})\.keras")
-#         container_client = blob_service_client_client.get_container_client(container_name)
-
-#         weights_list = []
-#         new_last_processed_timestamp = last_processed_timestamp
-
-#         blobs = list(container_client.list_blobs())
-#         # print(blobs)
-#         for blob in blobs:
-#             match = pattern.match(blob.name)
-#             if match:
-#                 timestamp_str = match.group(1)
-#                 timestamp_int = int(timestamp_str.replace("_", ""))
-#                 if timestamp_int > last_processed_timestamp:
-#                     blob_client = container_client.get_blob_client(blob.name)
-#                     with tempfile.NamedTemporaryFile(suffix='.keras', delete=False) as temp_file:
-#                         download_stream = blob_client.download_blob()
-#                         temp_file.write(download_stream.readall())
-#                         temp_path = temp_file.name
-#                     model.load_weights(temp_path)
-#                     weights = model.get_weights()
-#                     os.unlink(temp_path)
-
-#                     weights_list.append(weights)
-#                     new_last_processed_timestamp = max(new_last_processed_timestamp, timestamp_int)
-
-
-#         if not weights_list:
-#             logging.info(f"No new weights found since {last_processed_timestamp}.")
-#             return None, last_processed_timestamp
-        
-#         logging.info(f"Loaded weights from {len(weights_list)} files.")
-#         return weights_list, new_last_processed_timestamp
-
-#     except Exception as e:
-#         logging.error(f"Error loading weights: {e}")
-#         if 'temp_path' in locals() and os.path.exists(temp_path):
-#             os.unlink(temp_path)
-#         return None, last_processed_timestamp
-
 import logging
 import os
 import re
@@ -486,7 +439,7 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
 # Scheduler setup
 scheduler = BackgroundScheduler()
 
-@scheduler.scheduled_job(CronTrigger(minute="*/2"))
+@scheduler.scheduled_job(CronTrigger(minute="*/5"))
 def scheduled_aggregate_weights():
     """
     Scheduled task to aggregate weights every minute.
