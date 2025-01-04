@@ -14,14 +14,22 @@ import re
 import uuid
 from fastapi import Body
 from dotenv import load_dotenv
-
-load_dotenv()
-
+import logging
+import os
+import re
+import tempfile
+from typing import List, Optional, Tuple
+import numpy as np
+from azure.storage.blob import BlobServiceClient
 import os
 from sqlalchemy import create_engine, Column, String, DateTime, Table, Integer, ForeignKey
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship
 from datetime import datetime
+
+
+load_dotenv()
+
 
 # Database configuration
 DATABASE_URL = os.getenv("DATABASE_URL")  # Format: postgresql://user:password@host:port/database
@@ -163,13 +171,6 @@ def get_model_architecture() -> Optional[object]:
         return None
 
 
-import logging
-import os
-import re
-import tempfile
-from typing import List, Optional, Tuple
-import numpy as np
-from azure.storage.blob import BlobServiceClient
 
 def load_weights_from_blob(
     blob_service_client: BlobServiceClient,
