@@ -22,6 +22,8 @@ from typing import List, Optional, Tuple
 import numpy as np
 from azure.storage.blob import BlobServiceClient
 import os
+from fastapi.responses import HTMLResponse
+import random
 from sqlalchemy import create_engine, Column, String, DateTime, Table, Integer, ForeignKey
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship
@@ -314,10 +316,82 @@ def verify_admin(api_key: str):
     if api_key != admin_key:
         raise HTTPException(status_code=403, detail="Unauthorized admin access")
 
-@app.get("/")
+# @app.get("/")
+# def read_root():
+#     return {"message": "Hello, World!"}
+
+import random
+
+@app.get("/", response_class=HTMLResponse)
 def read_root():
-    return {"message": "Hello, World!"}
-   
+    quotes = [
+        "The best way to predict the future is to code it.",
+        "Simplicity is the soul of efficiency.",
+        "Code is like humor. When you have to explain it, it’s bad.",
+        "Programming isn’t about what you know; it’s about what you can figure out.",
+        "Push yourself, because no one else is going to do it for you."
+    ]
+    quote = random.choice(quotes)
+    html_content = f"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Coder's Mood</title>
+        <style>
+            body {{
+                background-color: #121212;
+                color: #e0e0e0;
+                font-family: 'Arial', sans-serif;
+                margin: 0;
+                padding: 0;
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                height: 100vh;
+                text-align: center;
+            }}
+            h1 {{
+                font-size: 3em;
+                margin-bottom: 0.5em;
+            }}
+            p {{
+                font-size: 1.5em;
+                font-style: italic;
+            }}
+            .quote {{
+                font-size: 1.2em;
+                color: #8f8f8f;
+            }}
+            .refresh-button {{
+                background-color: #333;
+                color: #fff;
+                padding: 10px 20px;
+                border: none;
+                border-radius: 5px;
+                cursor: pointer;
+                font-size: 1em;
+                transition: background-color 0.3s;
+            }}
+            .refresh-button:hover {{
+                background-color: #555;
+            }}
+        </style>
+    </head>
+    <body>
+        <div>
+            <h1>Code, Create, Conquer</h1>
+            <p>Keep pushing those limits!</p>
+            <p class="quote">"{quote}"</p>
+            <button class="refresh-button" onclick="window.location.reload();">Refresh Mood</button>
+        </div>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
+
+
 # Modified registration endpoint
 @app.post("/register")
 async def register(
@@ -452,3 +526,7 @@ def scheduled_aggregate_weights():
         raise
 
 scheduler.start()
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="localhost", port=8000)
