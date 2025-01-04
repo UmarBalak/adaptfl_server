@@ -7,12 +7,10 @@ from azure.storage.blob import BlobServiceClient, BlobClient
 from tensorflow import keras
 from datetime import datetime
 import tempfile
-import io
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 import asyncio
 import re
-import json
 import uuid
 from fastapi import Body
 from dotenv import load_dotenv
