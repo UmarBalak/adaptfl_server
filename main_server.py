@@ -144,34 +144,71 @@ except Exception as e:
 
 
 
-def get_model_architecture() -> Optional[object]:
+# def get_model_architecture() -> Optional[object]:
+#     """
+#     Load model architecture from blob storage.
+#     """
+#     try:
+#         container_client = blob_service_client_client.get_container_client(CLIENT_CONTAINER_NAME)
+#         blob_client = container_client.get_blob_client(ARCH_BLOB_NAME)
+        
+#         # Download architecture file to memory
+#         arch_data = blob_client.download_blob().readall()
+#         with tempfile.NamedTemporaryFile(suffix='.keras', delete=False) as temp_file:
+#             temp_file.write(arch_data)
+#             temp_path = temp_file.name
+        
+#         model = keras.models.load_model(temp_path, compile=False)
+
+#         os.unlink(temp_path)
+#         return model
+    
+#     except ImportError as e:
+#         if 'temp_path' in locals() and os.path.exists(temp_path):
+#             os.unlink(temp_path)
+#         return None
+#     except Exception as e:
+#         if 'temp_path' in locals() and os.path.exists(temp_path):
+#             os.unlink(temp_path)
+#         return None
+
+def get_model_architecture() -> Optional[keras.Model]:
     """
     Load model architecture from blob storage.
+    
+    Returns:
+        Optional[keras.Model]: The loaded Keras model or None if loading fails.
     """
+    temp_path = None  # Initialize temp_path outside try block for scope
+    
     try:
+        # Create a blob service client (ensure blob_service_client is defined)
         container_client = blob_service_client_client.get_container_client(CLIENT_CONTAINER_NAME)
         blob_client = container_client.get_blob_client(ARCH_BLOB_NAME)
         
         # Download architecture file to memory
         arch_data = blob_client.download_blob().readall()
+        
+        # Use NamedTemporaryFile to create a temporary file for the model
         with tempfile.NamedTemporaryFile(suffix='.keras', delete=False) as temp_file:
             temp_file.write(arch_data)
             temp_path = temp_file.name
         
+        # Load the model from the temporary file
         model = keras.models.load_model(temp_path, compile=False)
-
-        os.unlink(temp_path)
+        
         return model
     
     except ImportError as e:
-        if 'temp_path' in locals() and os.path.exists(temp_path):
-            os.unlink(temp_path)
+        print(f"ImportError: {e}")  # Log or handle import errors specifically
         return None
     except Exception as e:
-        if 'temp_path' in locals() and os.path.exists(temp_path):
-            os.unlink(temp_path)
+        print(f"An error occurred: {e}")  # Log other exceptions
         return None
-
+    finally:
+        # Cleanup temporary file if it was created
+        if temp_path and os.path.exists(temp_path):
+            os.unlink(temp_path)
 
 def load_weights_from_blob(
     blob_service_client: BlobServiceClient,
