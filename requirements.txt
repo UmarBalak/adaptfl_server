@@ -6,3 +6,4 @@ azure-storage-blob
 apscheduler
 python-dotenv
 sqlalchemy
+psycopg2
