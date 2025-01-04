@@ -195,21 +195,26 @@ def get_model_architecture() -> Optional[keras.Model]:
             temp_path = temp_file.name
         
         # Load the model from the temporary file
-        model = keras.models.load_model(temp_path, compile=False)
+        model = load_model(temp_path, compile=False)
         
         return model
     
     except ImportError as e:
-        print(f"ImportError: {e}")  # Log or handle import errors specifically
-        return None
+        logging.error(f"ImportError occurred: {e}")
+        raise HTTPException(status_code=500, detail=f"ImportError: {str(e)}")
+    
+    except FileNotFoundError as e:
+        logging.error(f"FileNotFoundError occurred: {e}")
+        raise HTTPException(status_code=500, detail=f"File not found: {str(e)}")
+    
     except Exception as e:
-        print(f"An error occurred: {e}")  # Log other exceptions
-        return None
+        logging.error(f"An error occurred while loading the model: {e}")
+        raise HTTPException(status_code=500, detail=f"Error loading model: {str(e)}")
+    
     finally:
         # Cleanup temporary file if it was created
         if temp_path and os.path.exists(temp_path):
             os.unlink(temp_path)
-
 def load_weights_from_blob(
     blob_service_client: BlobServiceClient,
     container_name: str,
