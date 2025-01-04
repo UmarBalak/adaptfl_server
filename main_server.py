@@ -144,32 +144,28 @@ except Exception as e:
 
 
 
+from keras.models import load_model
+
 def get_model_architecture() -> Optional[object]:
     """
-    Load model architecture from blob storage.
+    Load model architecture from blob storage directly without using file system or caching.
     """
     try:
+        # Access the blob service
         container_client = blob_service_client_client.get_container_client(CLIENT_CONTAINER_NAME)
         blob_client = container_client.get_blob_client(ARCH_BLOB_NAME)
-        
-        # Download architecture file to memory
-        arch_data = blob_client.download_blob().readall()
-        with tempfile.NamedTemporaryFile(suffix='.keras', delete=False) as temp_file:
-            temp_file.write(arch_data)
-            temp_path = temp_file.name
-        
-        model = keras.models.load_model(temp_path, compile=False)
 
-        os.unlink(temp_path)
+        # Download architecture file directly into memory and load model
+        arch_data = blob_client.download_blob().readall()
+
+        # Load the model directly from the byte data without writing to disk
+        model = load_model(arch_data, compile=False)
+
         return model
-    
-    except ImportError as e:
-        if 'temp_path' in locals() and os.path.exists(temp_path):
-            os.unlink(temp_path)
-        return None
+
     except Exception as e:
-        if 'temp_path' in locals() and os.path.exists(temp_path):
-            os.unlink(temp_path)
+        # Log the error properly for debugging purposes
+        logging.error(f"Error loading model: {str(e)}")
         return None
 
 
@@ -392,41 +388,57 @@ def read_root():
     return HTMLResponse(content=html_content)
 
 
-# Modified registration endpoint
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Body, Depends
+from sqlalchemy.orm import Session
+from uuid import uuid4
+import logging
+
+# Assuming your database models and dependencies are imported correctly
+from models import Client, GlobalModel
+from database import get_db  # A utility to get the DB session
+
+
+# Updated register endpoint with error handling
 @app.post("/register")
 async def register(
     csn: str = Body(...),
     admin_api_key: str = Body(...),
     db: Session = Depends(get_db)
 ):
-    verify_admin(admin_api_key)
-    
-    existing_client = db.query(Client).filter(Client.csn == csn).first()
-    if existing_client:
-        raise HTTPException(status_code=400, detail="Client already registered")
-    
-    client_id = str(uuid.uuid4())
-    api_key = str(uuid.uuid4())
-    
-    new_client = Client(
-        csn=csn,
-        client_id=client_id,
-        api_key=api_key
-    )
-    
-    db.add(new_client)
-    db.commit()
-    
-    return {
-        "status": "success",
-        "message": "Client registered successfully",
-        "data": {"client_id": client_id, "api_key": api_key}
-    }
+    try:
+        verify_admin(admin_api_key)
+
+        # Check if the client is already registered
+        existing_client = db.query(Client).filter(Client.csn == csn).first()
+        if existing_client:
+            raise HTTPException(status_code=400, detail="Client already registered")
+
+        client_id = str(uuid4())
+        api_key = str(uuid4())
+
+        new_client = Client(
+            csn=csn,
+            client_id=client_id,
+            api_key=api_key
+        )
+
+        db.add(new_client)
+        db.commit()
+        db.refresh(new_client)
+
+        return {
+            "status": "success",
+            "message": "Client registered successfully",
+            "data": {"client_id": new_client.client_id, "api_key": new_client.api_key}
+        }
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
 
 
+# Updated aggregate_weights endpoint with better error handling
 @app.get("/aggregate-weights")
-async def aggregate_weights():
-    db = next(get_db())
+async def aggregate_weights(db: Session = Depends(get_db)):
     try:
         model = get_model_architecture()
         if not model:
@@ -448,13 +460,13 @@ async def aggregate_weights():
         global_vars['latest_version'] += 1
         filename = get_versioned_filename(global_vars['latest_version'])
 
-        # avg_weights = federated_averaging(weights_list)
+        # Perform federated weighted averaging
         avg_weights = federated_weighted_averaging(weights_list, num_examples_list, loss_list)
         if not avg_weights or not save_weights_to_blob(avg_weights, filename, model):
             raise HTTPException(status_code=500, detail="Failed to save aggregated weights")
 
         global_vars['last_processed_timestamp'] = new_timestamp
-        
+
         # Update database
         client_ids = [c.client_id for c in db.query(Client).all()]
         new_model = GlobalModel(
@@ -463,8 +475,8 @@ async def aggregate_weights():
             client_ids=",".join(client_ids)
         )
         db.add(new_model)
-        
-        # Update contribution counts
+
+        # Update contribution counts for clients
         db.query(Client).update({"contribution_count": Client.contribution_count + 1})
         db.commit()
 
@@ -476,18 +488,20 @@ async def aggregate_weights():
         }
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Error in aggregating weights: {str(e)}")
 
 
-@app.websocket("/ws/{client_id}") 
-async def websocket_endpoint(websocket: WebSocket, client_id: str):
-    db = SessionLocal()  # Direct session creation
+# WebSocket endpoint with session management and error handling
+@app.websocket("/ws/{client_id}")
+async def websocket_endpoint(websocket: WebSocket, client_id: str, db: Session = Depends(get_db)):
     try:
+        # Ensure valid client
         client = db.query(Client).filter(Client.client_id == client_id).first()
         if not client:
             await websocket.close(code=1008, reason="Unauthorized")
             return
 
+        # Connect WebSocket
         await manager.connect(client_id, websocket)
         client.status = "Active"
         db.commit()
@@ -506,11 +520,13 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
     except Exception as e:
         logging.error(f"WebSocket error: {e}")
     finally:
+        # Disconnect the client and set status to inactive
         await manager.disconnect(client_id)
         if client:
             client.status = "Inactive"
             db.commit()
         db.close()
+
 
 # Scheduler setup
 scheduler = BackgroundScheduler()
