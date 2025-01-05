@@ -145,74 +145,27 @@ except Exception as e:
 
 
 
-# def get_model_architecture() -> Optional[object]:
-#     """
-#     Load model architecture from blob storage.
-#     """
-#     try:
-#         container_client = blob_service_client_client.get_container_client(CLIENT_CONTAINER_NAME)
-#         blob_client = container_client.get_blob_client(ARCH_BLOB_NAME)
-        
-#         # Download architecture file to memory
-#         arch_data = blob_client.download_blob().readall()
-#         with tempfile.NamedTemporaryFile(suffix='.keras', delete=False) as temp_file:
-#             temp_file.write(arch_data)
-#             temp_path = temp_file.name
-        
-#         model = keras.models.load_model(temp_path, compile=False)
-
-#         os.unlink(temp_path)
-#         return model
-    
-#     except ImportError as e:
-#         if 'temp_path' in locals() and os.path.exists(temp_path):
-#             os.unlink(temp_path)
-#         return None
-#     except Exception as e:
-#         if 'temp_path' in locals() and os.path.exists(temp_path):
-#             os.unlink(temp_path)
-#         return None
-
-def get_model_architecture() -> Optional[keras.Model]:
+def get_model_architecture() -> Optional[object]:
     """
-    Load model architecture from blob storage using a temporary memory file system.
+    Load model architecture from blob storage.
     """
     try:
-        import tempfile
-        import tensorflow as tf
-        from tensorflow import keras
-        
-        logging.info(f"Attempting to access container: {CLIENT_CONTAINER_NAME}")
         container_client = blob_service_client_client.get_container_client(CLIENT_CONTAINER_NAME)
-        
-        logging.info(f"Attempting to access blob: {ARCH_BLOB_NAME}")
         blob_client = container_client.get_blob_client(ARCH_BLOB_NAME)
         
-        if not blob_client.exists():
-            raise FileNotFoundError(f"Model architecture file {ARCH_BLOB_NAME} not found in storage")
-        
-        # Download blob data into memory
-        logging.info("Downloading blob data to memory")
+        # Download architecture file to memory
         arch_data = blob_client.download_blob().readall()
-        data_size = len(arch_data)
-        logging.info(f"Downloaded {data_size} bytes of data")
+        
+        model = keras.models.load_model(arch_data, compile=False)
 
-        # Create a memory-based temporary file
-        with tempfile.SpooledTemporaryFile(max_size=data_size * 2) as temp_file:
-            # Write the blob data to the spooled temporary file
-            temp_file.write(arch_data)
-            temp_file.seek(0)  # Reset file pointer to beginning
-            
-            # Use tensorflow's load_model directly with the file object
-            logging.info("Attempting to load model from memory file")
-            model = tf.keras.models.load_model(temp_file, compile=False)
-            logging.info("Model loaded successfully")
-            return model
-
+        return model
+    
+    except ImportError as e:
+        print(f"ImportError: {e}")
+        return None
     except Exception as e:
-        logging.error(f"An error occurred while loading the model: {e}")
-        raise HTTPException(status_code=500, detail=f"Error loading model: {str(e)}")
-
+        print(f"An error occurred: {e}")
+        return None
 
 
 
