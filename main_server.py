@@ -175,7 +175,8 @@ except Exception as e:
 
 def get_model_architecture() -> Optional[keras.Model]:
     """
-    Load model architecture from blob storage using in-memory handling for Render's read-only filesystem.
+    Load model architecture from blob storage using Keras load_model_from_json or h5py
+    depending on the format.
     """
     try:
         logging.info(f"Attempting to access container: {CLIENT_CONTAINER_NAME}")
@@ -191,22 +192,32 @@ def get_model_architecture() -> Optional[keras.Model]:
         logging.info("Downloading blob data to memory")
         arch_data = blob_client.download_blob().readall()
         logging.info(f"Downloaded {len(arch_data)} bytes of data")
-        
-        # Create in-memory buffer
+
+        # Import required Keras modules
+        from tensorflow import keras
+        import h5py
         import io
-        model_buffer = io.BytesIO(arch_data)
-        model_buffer.seek(0)  # Ensure we're at the start of the buffer
-        
-        logging.info("Attempting to load model from memory buffer")
-        model = keras.models.load_model(model_buffer, compile=False)
-        logging.info("Model loaded successfully")
-        
-        return model
-        
-    except ImportError as e:
-        logging.error(f"ImportError occurred: {e}")
-        raise HTTPException(status_code=500, detail=f"ImportError: {str(e)}")
-        
+
+        # Try loading as HDF5 format
+        try:
+            bytes_io = io.BytesIO(arch_data)
+            with h5py.File(bytes_io, 'r') as h5_file:
+                model = keras.models.load_model(h5_file, compile=False)
+                logging.info("Model loaded successfully using HDF5 format")
+                return model
+        except Exception as h5_error:
+            logging.warning(f"Failed to load as HDF5: {h5_error}")
+            
+            # If HDF5 fails, try loading as JSON
+            try:
+                json_str = arch_data.decode('utf-8')
+                model = keras.models.model_from_json(json_str)
+                logging.info("Model loaded successfully using JSON format")
+                return model
+            except Exception as json_error:
+                logging.error(f"Failed to load as JSON: {json_error}")
+                raise ValueError("Could not load model in either HDF5 or JSON format")
+
     except Exception as e:
         logging.error(f"An error occurred while loading the model: {e}")
         raise HTTPException(status_code=500, detail=f"Error loading model: {str(e)}")
