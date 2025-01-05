@@ -175,9 +175,8 @@ except Exception as e:
 
 def get_model_architecture() -> Optional[keras.Model]:
     """
-    Load model architecture from blob storage.
+    Load model architecture from blob storage using in-memory handling for Render's read-only filesystem.
     """
-    temp_path = None
     try:
         logging.info(f"Attempting to access container: {CLIENT_CONTAINER_NAME}")
         container_client = blob_service_client_client.get_container_client(CLIENT_CONTAINER_NAME)
@@ -185,76 +184,32 @@ def get_model_architecture() -> Optional[keras.Model]:
         logging.info(f"Attempting to access blob: {ARCH_BLOB_NAME}")
         blob_client = container_client.get_blob_client(ARCH_BLOB_NAME)
         
-        # Check if blob exists
         if not blob_client.exists():
-            logging.error(f"Blob {ARCH_BLOB_NAME} does not exist in container {CLIENT_CONTAINER_NAME}")
             raise FileNotFoundError(f"Model architecture file {ARCH_BLOB_NAME} not found in storage")
         
-        logging.info("Downloading blob data")
+        # Download blob data into memory
+        logging.info("Downloading blob data to memory")
         arch_data = blob_client.download_blob().readall()
         logging.info(f"Downloaded {len(arch_data)} bytes of data")
         
-        # Create temp directory if it doesn't exist
-        temp_dir = '/tmp'
-        if not os.path.exists(temp_dir):
-            os.makedirs(temp_dir)
-            
-        # Use a more robust temporary file creation
-        temp_path = os.path.join(temp_dir, f'model_{uuid.uuid4()}.keras')
+        # Create in-memory buffer
+        import io
+        model_buffer = io.BytesIO(arch_data)
+        model_buffer.seek(0)  # Ensure we're at the start of the buffer
         
-        # Write data in binary mode
-        with open(temp_path, 'wb') as temp_file:
-            temp_file.write(arch_data)
-            temp_file.flush()
-            os.fsync(temp_file.fileno())
-        
-        logging.info(f"Written data to temporary file: {temp_path}")
-        
-        # Add delay to ensure file is fully written
-        time.sleep(1)
-        
-        # Verify file exists and has content
-        if not os.path.exists(temp_path):
-            raise FileNotFoundError(f"Temporary file {temp_path} was not created")
-            
-        file_size = os.path.getsize(temp_path)
-        logging.info(f"Temporary file size: {file_size} bytes")
-        
-        if file_size == 0:
-            raise ValueError("Temporary file is empty")
-        
-        # Add file permission check and modification if needed
-        current_perms = os.stat(temp_path).st_mode
-        if not (current_perms & 0o400):  # Check if file is readable
-            os.chmod(temp_path, 0o644)  # Make file readable
-            
-        logging.info("Attempting to load model from temporary file")
-        model = keras.models.load_model(temp_path, compile=False)
+        logging.info("Attempting to load model from memory buffer")
+        model = keras.models.load_model(model_buffer, compile=False)
         logging.info("Model loaded successfully")
         
         return model
-    
+        
     except ImportError as e:
         logging.error(f"ImportError occurred: {e}")
         raise HTTPException(status_code=500, detail=f"ImportError: {str(e)}")
-    
-    except FileNotFoundError as e:
-        logging.error(f"FileNotFoundError occurred: {e}")
-        raise HTTPException(status_code=500, detail=f"File not found: {str(e)}")
-    
+        
     except Exception as e:
         logging.error(f"An error occurred while loading the model: {e}")
         raise HTTPException(status_code=500, detail=f"Error loading model: {str(e)}")
-    
-    finally:
-        if temp_path and os.path.exists(temp_path):
-            try:
-                os.unlink(temp_path)
-                logging.info(f"Temporary file {temp_path} cleaned up")
-            except Exception as e:
-                logging.error(f"Error cleaning up temporary file: {e}")
-
-
 def load_weights_from_blob(
     blob_service_client: BlobServiceClient,
     container_name: str,
