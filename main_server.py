@@ -28,6 +28,7 @@ from sqlalchemy import create_engine, Column, String, DateTime, Table, Integer, 
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship
 from datetime import datetime
+import time
 
 
 load_dotenv()
