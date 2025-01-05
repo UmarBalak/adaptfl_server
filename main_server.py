@@ -193,10 +193,24 @@ def get_model_architecture() -> Optional[keras.Model]:
         arch_data = blob_client.download_blob().readall()
         logging.info(f"Downloaded {len(arch_data)} bytes of data")
         
-        with tempfile.NamedTemporaryFile(suffix='.keras', delete=False) as temp_file:
+        # Create temp directory if it doesn't exist
+        temp_dir = '/tmp'
+        if not os.path.exists(temp_dir):
+            os.makedirs(temp_dir)
+            
+        # Use a more robust temporary file creation
+        temp_path = os.path.join(temp_dir, f'model_{uuid.uuid4()}.keras')
+        
+        # Write data in binary mode
+        with open(temp_path, 'wb') as temp_file:
             temp_file.write(arch_data)
-            temp_path = temp_file.name
-            logging.info(f"Written data to temporary file: {temp_path}")
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+        
+        logging.info(f"Written data to temporary file: {temp_path}")
+        
+        # Add delay to ensure file is fully written
+        time.sleep(1)
         
         # Verify file exists and has content
         if not os.path.exists(temp_path):
@@ -208,6 +222,11 @@ def get_model_architecture() -> Optional[keras.Model]:
         if file_size == 0:
             raise ValueError("Temporary file is empty")
         
+        # Add file permission check and modification if needed
+        current_perms = os.stat(temp_path).st_mode
+        if not (current_perms & 0o400):  # Check if file is readable
+            os.chmod(temp_path, 0o644)  # Make file readable
+            
         logging.info("Attempting to load model from temporary file")
         model = keras.models.load_model(temp_path, compile=False)
         logging.info("Model loaded successfully")
@@ -233,6 +252,8 @@ def get_model_architecture() -> Optional[keras.Model]:
                 logging.info(f"Temporary file {temp_path} cleaned up")
             except Exception as e:
                 logging.error(f"Error cleaning up temporary file: {e}")
+
+
 def load_weights_from_blob(
     blob_service_client: BlobServiceClient,
     container_name: str,
