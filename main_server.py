@@ -166,11 +166,9 @@ def get_model_architecture() -> Optional[object]:
         return model
     
     except ImportError as e:
-        print(f"ImportError: {e}")
-        return None
+        raise HTTPException(status_code=500, detail=e)
     except Exception as e:
-        print(f"An error occurred: {e}")
-        return None
+        raise HTTPException(status_code=500, detail=e)
 
 
 
