@@ -143,7 +143,8 @@ try:
 except Exception as e:
     raise
 
-
+import h5py
+import BytesIO
 
 def get_model_architecture() -> Optional[object]:
     """
@@ -154,9 +155,12 @@ def get_model_architecture() -> Optional[object]:
         blob_client = container_client.get_blob_client(ARCH_BLOB_NAME)
         
         # Download architecture file to memory
-        arch_data = blob_client.download_blob().readall()
+        arch_data = blob_client.download_blob(0)
         
-        model = keras.models.load_model(arch_data, compile=False)
+        with BytesIO() as f:
+            arch_data.readinto(f)
+            with h5py.File(f, 'r') as h5file:
+                model = keras.models.load_model(h5file)
 
         return model
     
