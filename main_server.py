@@ -175,27 +175,42 @@ except Exception as e:
 def get_model_architecture() -> Optional[keras.Model]:
     """
     Load model architecture from blob storage.
-    
-    Returns:
-        Optional[keras.Model]: The loaded Keras model or None if loading fails.
     """
-    temp_path = None  # Initialize temp_path outside try block for scope
-    
+    temp_path = None
     try:
-        # Create a blob service client (ensure blob_service_client is defined)
+        logging.info(f"Attempting to access container: {CLIENT_CONTAINER_NAME}")
         container_client = blob_service_client_client.get_container_client(CLIENT_CONTAINER_NAME)
+        
+        logging.info(f"Attempting to access blob: {ARCH_BLOB_NAME}")
         blob_client = container_client.get_blob_client(ARCH_BLOB_NAME)
         
-        # Download architecture file to memory
-        arch_data = blob_client.download_blob().readall()
+        # Check if blob exists
+        if not blob_client.exists():
+            logging.error(f"Blob {ARCH_BLOB_NAME} does not exist in container {CLIENT_CONTAINER_NAME}")
+            raise FileNotFoundError(f"Model architecture file {ARCH_BLOB_NAME} not found in storage")
         
-        # Use NamedTemporaryFile to create a temporary file for the model
+        logging.info("Downloading blob data")
+        arch_data = blob_client.download_blob().readall()
+        logging.info(f"Downloaded {len(arch_data)} bytes of data")
+        
         with tempfile.NamedTemporaryFile(suffix='.keras', delete=False) as temp_file:
             temp_file.write(arch_data)
             temp_path = temp_file.name
+            logging.info(f"Written data to temporary file: {temp_path}")
         
-        # Load the model from the temporary file
+        # Verify file exists and has content
+        if not os.path.exists(temp_path):
+            raise FileNotFoundError(f"Temporary file {temp_path} was not created")
+            
+        file_size = os.path.getsize(temp_path)
+        logging.info(f"Temporary file size: {file_size} bytes")
+        
+        if file_size == 0:
+            raise ValueError("Temporary file is empty")
+        
+        logging.info("Attempting to load model from temporary file")
         model = keras.models.load_model(temp_path, compile=False)
+        logging.info("Model loaded successfully")
         
         return model
     
@@ -212,9 +227,12 @@ def get_model_architecture() -> Optional[keras.Model]:
         raise HTTPException(status_code=500, detail=f"Error loading model: {str(e)}")
     
     finally:
-        # Cleanup temporary file if it was created
         if temp_path and os.path.exists(temp_path):
-            os.unlink(temp_path)
+            try:
+                os.unlink(temp_path)
+                logging.info(f"Temporary file {temp_path} cleaned up")
+            except Exception as e:
+                logging.error(f"Error cleaning up temporary file: {e}")
 def load_weights_from_blob(
     blob_service_client: BlobServiceClient,
     container_name: str,
@@ -356,6 +374,23 @@ def verify_admin(api_key: str):
     admin_key = os.getenv("ADMIN_API_KEY", "your_admin_secret_key")
     if api_key != admin_key:
         raise HTTPException(status_code=403, detail="Unauthorized admin access")
+
+@app.on_event("startup")
+async def startup_event():
+    try:
+        # Verify Azure Blob Storage connectivity
+        container_client = blob_service_client_client.get_container_client(CLIENT_CONTAINER_NAME)
+        blob_client = container_client.get_blob_client(ARCH_BLOB_NAME)
+        
+        if not blob_client.exists():
+            logging.error(f"Model architecture file {ARCH_BLOB_NAME} not found in storage")
+            raise FileNotFoundError(f"Model architecture file not found")
+            
+        logging.info("Successfully verified Azure Blob Storage connectivity and model file existence")
+        
+    except Exception as e:
+        logging.error(f"Startup verification failed: {e}")
+        raise
 
 # @app.get("/")
 # def read_root():
