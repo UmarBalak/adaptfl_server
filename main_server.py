@@ -144,7 +144,8 @@ except Exception as e:
     raise
 
 import h5py
-import BytesIO
+from io import BytesIO
+
 
 def get_model_architecture() -> Optional[object]:
     """
