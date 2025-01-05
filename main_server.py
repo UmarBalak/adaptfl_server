@@ -175,10 +175,13 @@ except Exception as e:
 
 def get_model_architecture() -> Optional[keras.Model]:
     """
-    Load model architecture from blob storage using Keras load_model_from_json or h5py
-    depending on the format.
+    Load model architecture from blob storage using a temporary memory file system.
     """
     try:
+        import tempfile
+        import tensorflow as tf
+        from tensorflow import keras
+        
         logging.info(f"Attempting to access container: {CLIENT_CONTAINER_NAME}")
         container_client = blob_service_client_client.get_container_client(CLIENT_CONTAINER_NAME)
         
@@ -191,36 +194,36 @@ def get_model_architecture() -> Optional[keras.Model]:
         # Download blob data into memory
         logging.info("Downloading blob data to memory")
         arch_data = blob_client.download_blob().readall()
-        logging.info(f"Downloaded {len(arch_data)} bytes of data")
+        data_size = len(arch_data)
+        logging.info(f"Downloaded {data_size} bytes of data")
 
-        # Import required Keras modules
-        from tensorflow import keras
-        import h5py
-        import io
-
-        # Try loading as HDF5 format
-        try:
-            bytes_io = io.BytesIO(arch_data)
-            with h5py.File(bytes_io, 'r') as h5_file:
-                model = keras.models.load_model(h5_file, compile=False)
-                logging.info("Model loaded successfully using HDF5 format")
-                return model
-        except Exception as h5_error:
-            logging.warning(f"Failed to load as HDF5: {h5_error}")
+        # Create a memory-based temporary file
+        with tempfile.SpooledTemporaryFile(max_size=data_size * 2) as temp_file:
+            # Write the blob data to the spooled temporary file
+            temp_file.write(arch_data)
+            temp_file.seek(0)  # Reset file pointer to beginning
             
-            # If HDF5 fails, try loading as JSON
-            try:
-                json_str = arch_data.decode('utf-8')
-                model = keras.models.model_from_json(json_str)
-                logging.info("Model loaded successfully using JSON format")
-                return model
-            except Exception as json_error:
-                logging.error(f"Failed to load as JSON: {json_error}")
-                raise ValueError("Could not load model in either HDF5 or JSON format")
+            # Use tensorflow's load_model directly with the file object
+            logging.info("Attempting to load model from memory file")
+            model = tf.keras.models.load_model(temp_file, compile=False)
+            logging.info("Model loaded successfully")
+            return model
 
     except Exception as e:
         logging.error(f"An error occurred while loading the model: {e}")
         raise HTTPException(status_code=500, detail=f"Error loading model: {str(e)}")
+
+
+
+
+
+
+
+
+
+
+
+
 def load_weights_from_blob(
     blob_service_client: BlobServiceClient,
     container_name: str,
