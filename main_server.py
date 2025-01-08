@@ -7,32 +7,23 @@ from azure.storage.blob import BlobServiceClient, BlobClient
 from tensorflow import keras
 from datetime import datetime
 import tempfile
+import io
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 import asyncio
 import re
+import json
 import uuid
 from fastapi import Body
 from dotenv import load_dotenv
-import logging
+
+load_dotenv()
+
 import os
-import re
-import tempfile
-from typing import List, Optional, Tuple
-import numpy as np
-from azure.storage.blob import BlobServiceClient
-import os
-from fastapi.responses import HTMLResponse
-import random
 from sqlalchemy import create_engine, Column, String, DateTime, Table, Integer, ForeignKey
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship
 from datetime import datetime
-import time
-
-
-load_dotenv()
-
 
 # Database configuration
 DATABASE_URL = os.getenv("DATABASE_URL")  # Format: postgresql://user:password@host:port/database
@@ -96,6 +87,17 @@ def get_db():
     finally:
         db.close()
 
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("server.log"),
+        logging.StreamHandler()
+    ]
+)
+
 class ConnectionManager:
     def __init__(self):
         self.active_connections: Dict[str, WebSocket] = {}
@@ -105,16 +107,21 @@ class ConnectionManager:
         await websocket.accept()
         self.active_connections[client_id] = websocket
 
+        logging.info(f"Client {client_id} connected. Total connections: {len(self.active_connections)}")
+
     async def disconnect(self, client_id: str):
         if client_id in self.active_connections:
             del self.active_connections[client_id]
+            logging.info(f"Client {client_id} disconnected. Total connections: {len(self.active_connections)}")
 
     async def broadcast_model_update(self, message: str):
         disconnected_clients = []
         for client_id, connection in self.active_connections.items():
             try:
                 await connection.send_text(message)
+                logging.info(f"Update notification sent to client {client_id}")
             except Exception as e:
+                logging.error(f"Failed to send update to client {client_id}: {e}")
                 disconnected_clients.append(client_id)
         
         # Clean up disconnected clients
@@ -134,6 +141,7 @@ ARCH_BLOB_NAME = "model_architecture.keras"
 CLIENT_NOTIFICATION_URL = os.getenv("CLIENT_NOTIFICATION_URL")
 
 if not CLIENT_ACCOUNT_URL or not SERVER_ACCOUNT_URL:
+    logging.error("SAS url environment variable is missing.")
     raise ValueError("Missing required environment variable: SAS url")
 
 
@@ -141,10 +149,9 @@ try:
     blob_service_client_client = BlobServiceClient(account_url=CLIENT_ACCOUNT_URL)
     blob_service_client_server = BlobServiceClient(account_url=SERVER_ACCOUNT_URL)
 except Exception as e:
+    logging.error(f"Failed to initialize Azure Blob Service: {e}")
     raise
 
-import h5py
-from io import BytesIO
 
 
 def get_model_architecture() -> Optional[object]:
@@ -153,32 +160,87 @@ def get_model_architecture() -> Optional[object]:
     """
     try:
         container_client = blob_service_client_client.get_container_client(CLIENT_CONTAINER_NAME)
+        logging.info("Container client initialized successfully.")
         blob_client = container_client.get_blob_client(ARCH_BLOB_NAME)
+        logging.info("Blob client initialized successfully.")
         
         # Download architecture file to memory
-        arch_data = blob_client.download_blob(0)
+        arch_data = blob_client.download_blob().readall()
+        with tempfile.NamedTemporaryFile(suffix='.keras', delete=False) as temp_file:
+            temp_file.write(arch_data)
+            temp_path = temp_file.name
         
-        with BytesIO() as f:
-            arch_data.readinto(f)
-            with h5py.File(f, 'r') as h5file:
-                model = keras.models.load_model(h5file)
+        model = keras.models.load_model(temp_path, compile=False)
 
+        os.unlink(temp_path)
         return model
     
     except ImportError as e:
-        raise HTTPException(status_code=500, detail=e)
+        logging.error(f"Import error while loading model architecture: {e}")
+        if 'temp_path' in locals() and os.path.exists(temp_path):
+            os.unlink(temp_path)
+        return None
     except Exception as e:
-        raise HTTPException(status_code=500, detail=e)
+        logging.error(f"Error loading model architecture: {e}")
+        if 'temp_path' in locals() and os.path.exists(temp_path):
+            os.unlink(temp_path)
+        return None
 
 
+# def load_weights_from_blob(
+#     blob_service_client_client: BlobServiceClient,
+#     container_name: str,
+#     model,
+#     last_processed_timestamp: int
+# ) -> Optional[List[np.ndarray]]:
+#     try:
+#         pattern = re.compile(r"client[0-9a-fA-F\-]+_v\d+_(\d{8}_\d{6})\.keras")
+#         container_client = blob_service_client_client.get_container_client(container_name)
+
+#         weights_list = []
+#         new_last_processed_timestamp = last_processed_timestamp
+
+#         blobs = list(container_client.list_blobs())
+#         # print(blobs)
+#         for blob in blobs:
+#             match = pattern.match(blob.name)
+#             if match:
+#                 timestamp_str = match.group(1)
+#                 timestamp_int = int(timestamp_str.replace("_", ""))
+#                 if timestamp_int > last_processed_timestamp:
+#                     blob_client = container_client.get_blob_client(blob.name)
+#                     with tempfile.NamedTemporaryFile(suffix='.keras', delete=False) as temp_file:
+#                         download_stream = blob_client.download_blob()
+#                         temp_file.write(download_stream.readall())
+#                         temp_path = temp_file.name
+#                     model.load_weights(temp_path)
+#                     weights = model.get_weights()
+#                     os.unlink(temp_path)
+
+#                     weights_list.append(weights)
+#                     new_last_processed_timestamp = max(new_last_processed_timestamp, timestamp_int)
 
 
+#         if not weights_list:
+#             logging.info(f"No new weights found since {last_processed_timestamp}.")
+#             return None, last_processed_timestamp
+        
+#         logging.info(f"Loaded weights from {len(weights_list)} files.")
+#         return weights_list, new_last_processed_timestamp
 
+#     except Exception as e:
+#         logging.error(f"Error loading weights: {e}")
+#         if 'temp_path' in locals() and os.path.exists(temp_path):
+#             os.unlink(temp_path)
+#         return None, last_processed_timestamp
 
-
-
-
-
+import logging
+import os
+import re
+import tempfile
+from typing import List, Optional, Tuple
+import numpy as np
+from azure.storage.blob import BlobServiceClient
 
 def load_weights_from_blob(
     blob_service_client: BlobServiceClient,
@@ -218,6 +280,8 @@ def load_weights_from_blob(
                     
                     # Fetch metadata from the blob
                     blob_metadata = blob_client.get_blob_properties().metadata
+                    print("---------------------------------------")
+                    print(blob_metadata)
                     if blob_metadata:
                         # Convert metadata values to appropriate types if necessary
                         num_examples = int(blob_metadata.get('num_examples', 0))
@@ -235,11 +299,15 @@ def load_weights_from_blob(
                     new_last_processed_timestamp = max(new_last_processed_timestamp, timestamp_int)
 
         if not weights_list:
+            logging.info(f"No new weights found since {last_processed_timestamp}.")
             return None, [], [], last_processed_timestamp
         
+        logging.info(f"Loaded weights from {len(weights_list)} files.")
+        print(num_examples_list)
         return weights_list, num_examples_list, loss_list, new_last_processed_timestamp
 
     except Exception as e:
+        logging.error(f"Error loading weights: {e}")
         if 'temp_path' in locals() and os.path.exists(temp_path):
             os.unlink(temp_path)
         return None, [], [], last_processed_timestamp
@@ -264,20 +332,121 @@ def save_weights_to_blob(weights: List[np.ndarray], filename: str, model) -> boo
         with open(temp_path, "rb") as file:
             blob_client.upload_blob(file, overwrite=True)
         
+        logging.info(f"Successfully saved weights to blob: {filename}")
         return True
     except Exception as e:
+        logging.error(f"Error saving weights to blob: {e}")
         return False
     finally:
         if temp_path and os.path.exists(temp_path):
             os.unlink(temp_path)
 
+# def federated_averaging(weights_list):
+#     """
+#     Perform Federated Averaging on a list of model weights.
+
+#     Args:
+#         weights_list (list): List of model weights from clients.
+
+#     Returns:
+#         avg_weights (list): Federated averaged weights.
+#     """
+#     if not weights_list:
+#         logging.error("No weights available for aggregation")
+#         return None
+    
+#     avg_weights = []
+#     for layer_weights in zip(*weights_list):  # Iterate layer-wise
+#         avg_weights.append(np.mean(layer_weights, axis=0))  # Average weights for each layer
+#     logging.info("Federated averaging completed successfully.")
+#     return avg_weights
+
+# def federated_weighted_averaging(weights_list, num_examples_list):
+#     """
+#     Perform Weighted Federated Averaging on a list of model weights.
+
+#     Args:
+#         weights_list (list of list of np.ndarray): List of model weights from clients.
+#         num_examples_list (list of int): List of the number of examples for each client.
+
+#     Returns:
+#         avg_weights (list of np.ndarray): Federated weighted averaged weights.
+#     """
+#     if not weights_list or not num_examples_list:
+#         logging.error("Weights or example counts missing for aggregation.")
+#         return None
+    
+#     # Total number of examples across all clients
+#     total_examples = sum(num_examples_list)
+#     if total_examples == 0:
+#         logging.error("Total examples is zero, cannot perform weighted averaging.")
+#         return None
+
+#     # Initialize averaged weights with the same structure and dtype as the first client's weights
+#     avg_weights = [np.zeros_like(layer, dtype=np.float64) for layer in weights_list[0]]
+
+    
+#     # Perform weighted averaging for each layer
+#     for i, layer_weights in enumerate(zip(*weights_list)):  # Layer-wise aggregation
+#         for client_idx, client_weights in enumerate(layer_weights):
+#             avg_weights[i] += client_weights * (num_examples_list[client_idx] / total_examples)
+    
+#     logging.info("Weighted Federated Averaging completed successfully.")
+#     return avg_weights
+
+# def federated_weighted_averaging(weights_list, num_examples_list, loss_list, alpha=0.8, epsilon=1e-8):
+#     """
+#     Perform Weighted Federated Averaging on a list of model weights, incorporating loss.
+
+#     Args:
+#         weights_list (list of list of np.ndarray): List of model weights from clients.
+#         num_examples_list (list of int): List of the number of examples for each client.
+#         loss_list (list of float): List of model losss for each client.
+#         alpha (float): Weighting factor for combining data size and loss.
+#         epsilon (float): Small constant to avoid division by zero.
+
+#     Returns:
+#         avg_weights (list of np.ndarray): Federated weighted averaged weights.
+#     """
+#     if not weights_list or not num_examples_list or not loss_list:
+#         logging.error("Weights, example counts, or loss values missing for aggregation.")
+#         return None
+    
+#     # Total number of examples across all clients
+#     total_examples = sum(num_examples_list)
+#     if total_examples == 0:
+#         logging.error("Total examples is zero, cannot perform weighted averaging.")
+#         return None
+
+#     # Normalize loss (inverted so lower loss has higher weight)
+#     inverted_loss = [1 / (loss + epsilon) for loss in loss_list]
+#     avg_inverted_loss = sum(inverted_loss) / len(inverted_loss)
+
+#     # Initialize averaged weights with the same structure and dtype as the first client's weights
+#     avg_weights = [np.zeros_like(layer, dtype=np.float64) for layer in weights_list[0]]
+
+#     # Perform weighted averaging for each layer
+#     for i, layer_weights in enumerate(zip(*weights_list)):  # Layer-wise aggregation
+#         for client_idx, client_weights in enumerate(layer_weights):
+#             # Combine data size and loss-based weights
+#             combined_weight = (
+#                 alpha * (num_examples_list[client_idx] / total_examples) +
+#                 (1 - alpha) * (inverted_loss[client_idx] / avg_inverted_loss)
+#             )
+#             avg_weights[i] += client_weights * combined_weight
+    
+#     logging.info("Weighted Federated Averaging with loss adjustment completed successfully.")
+#     return avg_weights
+
 def federated_weighted_averaging(weights_list, num_examples_list, loss_list, alpha=0.7):
     """Perform Weighted Federated Averaging with improved loss weighting."""
     if not weights_list or not num_examples_list or not loss_list:
+        logging.error("Missing inputs for aggregation.")
         return None
     
     total_examples = sum(num_examples_list)
     if total_examples == 0:
+        logging.error("Total examples is zero.")
         return None
 
     # Softmax-based loss weighting
@@ -322,98 +491,9 @@ def verify_admin(api_key: str):
     if api_key != admin_key:
         raise HTTPException(status_code=403, detail="Unauthorized admin access")
 
-@app.on_event("startup")
-async def startup_event():
-    try:
-        # Verify Azure Blob Storage connectivity
-        container_client = blob_service_client_client.get_container_client(CLIENT_CONTAINER_NAME)
-        blob_client = container_client.get_blob_client(ARCH_BLOB_NAME)
-        
-        if not blob_client.exists():
-            logging.error(f"Model architecture file {ARCH_BLOB_NAME} not found in storage")
-            raise FileNotFoundError(f"Model architecture file not found")
-            
-        logging.info("Successfully verified Azure Blob Storage connectivity and model file existence")
-        
-    except Exception as e:
-        logging.error(f"Startup verification failed: {e}")
-        raise
-
-# @app.get("/")
-# def read_root():
-#     return {"message": "Hello, World!"}
-
-import random
-
-@app.get("/", response_class=HTMLResponse)
-def read_root():
-    quotes = [
-        "The best way to predict the future is to code it.",
-        "Simplicity is the soul of efficiency.",
-        "Code is like humor. When you have to explain it, it’s bad.",
-        "Programming isn’t about what you know; it’s about what you can figure out.",
-        "Push yourself, because no one else is going to do it for you."
-    ]
-    quote = random.choice(quotes)
-    html_content = f"""
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Coder's Mood</title>
-        <style>
-            body {{
-                background-color: #121212;
-                color: #e0e0e0;
-                font-family: 'Arial', sans-serif;
-                margin: 0;
-                padding: 0;
-                display: flex;
-                justify-content: center;
-                align-items: center;
-                height: 100vh;
-                text-align: center;
-            }}
-            h1 {{
-                font-size: 3em;
-                margin-bottom: 0.5em;
-            }}
-            p {{
-                font-size: 1.5em;
-                font-style: italic;
-            }}
-            .quote {{
-                font-size: 1.2em;
-                color: #8f8f8f;
-            }}
-            .refresh-button {{
-                background-color: #333;
-                color: #fff;
-                padding: 10px 20px;
-                border: none;
-                border-radius: 5px;
-                cursor: pointer;
-                font-size: 1em;
-                transition: background-color 0.3s;
-            }}
-            .refresh-button:hover {{
-                background-color: #555;
-            }}
-        </style>
-    </head>
-    <body>
-        <div>
-            <h1>Code, Create, Conquer</h1>
-            <p>Keep pushing those limits!</p>
-            <p class="quote">"{quote}"</p>
-            <button class="refresh-button" onclick="window.location.reload();">Refresh Mood</button>
-        </div>
-    </body>
-    </html>
-    """
-    return HTMLResponse(content=html_content)
-
+@app.get("/")
+async def root():
+    return "HELLO, WORLD"
 
 # Modified registration endpoint
 @app.post("/register")
@@ -466,13 +546,17 @@ async def aggregate_weights():
             return {"status": "no_update", "message": "No new weights found", "num_clients": 0}
 
         if not num_examples_list:
+            print("Example counts missing for aggregation")
+            logging.error("Example counts missing for aggregation")
             return None
 
         global_vars['latest_version'] += 1
         filename = get_versioned_filename(global_vars['latest_version'])
 
         # avg_weights = federated_averaging(weights_list)
+        logging.info(f"Aggregating weights from {len(weights_list)} clients")
         avg_weights = federated_weighted_averaging(weights_list, num_examples_list, loss_list)
+        logging.info(f"Aggregation completed.")
         if not avg_weights or not save_weights_to_blob(avg_weights, filename, model):
             raise HTTPException(status_code=500, detail="Failed to save aggregated weights")
 
@@ -543,13 +627,14 @@ def scheduled_aggregate_weights():
     """
     Scheduled task to aggregate weights every minute.
     """
+    logging.info("Scheduled task: Starting weight aggregation process.")
     try:
         asyncio.run(aggregate_weights())
     except Exception as e:
-        raise
+        logging.error(f"Error during scheduled weight aggregation: {e}")
 
 scheduler.start()
 
-# if __name__ == "__main__":
-#     import uvicorn
-#     uvicorn.run(app, host="localhost", port=8000)
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="localhost", port=8000)
