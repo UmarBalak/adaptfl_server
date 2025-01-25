@@ -15,6 +15,13 @@ from sqlalchemy import func
 import uuid
 from fastapi import Body
 from fastapi.responses import JSONResponse
+import logging
+import os
+import re
+import tempfile
+from typing import List, Optional, Tuple
+import numpy as np
+from azure.storage.blob import BlobServiceClient
 from dotenv import load_dotenv
 
 load_dotenv(dotenv_path='.env')
@@ -22,6 +29,7 @@ load_dotenv(dotenv_path='.env')
 import os
 from sqlalchemy import create_engine, Column, String, DateTime, Table, Integer, ForeignKey
 from sqlalchemy.orm import sessionmaker, Session, relationship, declarative_base
+from sqlalchemy.exc import SQLAlchemyError
 from datetime import datetime
 
 # Database configuration
@@ -191,14 +199,6 @@ def get_model_architecture() -> Optional[object]:
         if 'temp_path' in locals() and os.path.exists(temp_path):
             os.unlink(temp_path)
         return None
-
-import logging
-import os
-import re
-import tempfile
-from typing import List, Optional, Tuple
-import numpy as np
-from azure.storage.blob import BlobServiceClient
 
 def load_weights_from_blob(
     blob_service_client: BlobServiceClient,
@@ -558,12 +558,14 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
         client = db.query(Client).filter(Client.client_id == client_id).first()
         if not client:
             await websocket.close(code=1008, reason="Unauthorized")
+            logging.warning(f"Unauthorized access attempt by client {client_id}.")
             return
 
         # Add the client to the WebSocket manager and update status
         await manager.connect(client_id, websocket)
         client.status = "Active"
         db.commit()
+        logging.info(f"Client {client_id} connected successfully, status updated to 'Active'.")
 
         # Inform the client about their updated status
         await websocket.send_text(f"Your status is now: {client.status}")
@@ -590,23 +592,44 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
                     db.commit()
                     await websocket.send_text(f"Your updated status is: {client.status}")
 
+            except WebSocketDisconnect:
+                logging.info(f"Client {client_id} disconnected gracefully.")
+                break  # Exit loop on graceful disconnect
             except Exception as inner_error:
-                logging.error(f"Error handling client {client_id} data: {inner_error}")
+                logging.error(f"Error handling message from client {client_id}: {inner_error}", exc_info=True)
+                await websocket.send_text("An error occurred. Please try again later.")
                 break
 
+    except SQLAlchemyError as db_error:
+        # Handle specific database errors
+        logging.error(f"Database error for client {client_id}: {db_error}", exc_info=True)
+        await websocket.close(code=1002, reason="Database error.")
     except WebSocketDisconnect:
-        logging.info(f"Client {client_id} disconnected.")
+        logging.info(f"Client {client_id} disconnected unexpectedly.")
+    except HTTPException as http_error:
+        # Catch HTTP exceptions (like 400, 404 errors) if needed
+        logging.error(f"HTTP error for client {client_id}: {http_error}", exc_info=True)
     except Exception as e:
-        logging.error(f"WebSocket error for client {client_id}: {e}")
+        # Catch all other exceptions
+        logging.error(f"Unexpected error for client {client_id}: {e}", exc_info=True)
+        await websocket.close(code=1000, reason="Internal server error.")
     finally:
-        # Remove the client from the WebSocket manager and update status
-        await manager.disconnect(client_id)
-        client = db.query(Client).filter(Client.client_id == client_id).first()
-        if client:
-            client.status = "Inactive"
-            db.commit()
-        db.close()
-        logging.info(f"Client {client_id} is inactive. Db updated successfully!")
+        # Cleanup: Disconnect the client and update the database
+        try:
+            await manager.disconnect(client_id)
+            # Update status to "Inactive"
+            client = db.query(Client).filter(Client.client_id == client_id).first()
+            if client:
+                client.status = "Inactive"
+                db.commit()
+                logging.info(f"Client {client_id} is now inactive. Db updated successfully!")
+        except SQLAlchemyError as db_error:
+            logging.error(f"Error updating status for client {client_id} in the database: {db_error}", exc_info=True)
+        except Exception as e:
+            logging.error(f"Error during final cleanup for client {client_id}: {e}", exc_info=True)
+        finally:
+            db.close()  # Ensure database session is always closed
+            logging.info(f"Database session closed for client {client_id}.")
 
 
 # Scheduler setup
