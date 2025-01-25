@@ -7,19 +7,11 @@ from azure.storage.blob import BlobServiceClient, BlobClient
 from tensorflow import keras
 from datetime import datetime
 import tempfile
-import io
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 import asyncio
 import re
-import json
 from sqlalchemy import func
-import matplotlib.pyplot as plt
-import io
-from PIL import Image
-import base64
-from fastapi.responses import StreamingResponse
-from datetime import datetime, timedelta
 import uuid
 from fastapi import Body
 from dotenv import load_dotenv
@@ -212,54 +204,6 @@ def get_model_architecture() -> Optional[object]:
         if 'temp_path' in locals() and os.path.exists(temp_path):
             os.unlink(temp_path)
         return None
-
-
-# def load_weights_from_blob(
-#     blob_service_client_client: BlobServiceClient,
-#     container_name: str,
-#     model,
-#     last_processed_timestamp: int
-# ) -> Optional[List[np.ndarray]]:
-#     try:
-#         pattern = re.compile(r"client[0-9a-fA-F\-]+_v\d+_(\d{8}_\d{6})\.keras")
-#         container_client = blob_service_client_client.get_container_client(container_name)
-
-#         weights_list = []
-#         new_last_processed_timestamp = last_processed_timestamp
-
-#         blobs = list(container_client.list_blobs())
-#         # print(blobs)
-#         for blob in blobs:
-#             match = pattern.match(blob.name)
-#             if match:
-#                 timestamp_str = match.group(1)
-#                 timestamp_int = int(timestamp_str.replace("_", ""))
-#                 if timestamp_int > last_processed_timestamp:
-#                     blob_client = container_client.get_blob_client(blob.name)
-#                     with tempfile.NamedTemporaryFile(suffix='.keras', delete=False) as temp_file:
-#                         download_stream = blob_client.download_blob()
-#                         temp_file.write(download_stream.readall())
-#                         temp_path = temp_file.name
-#                     model.load_weights(temp_path)
-#                     weights = model.get_weights()
-#                     os.unlink(temp_path)
-
-#                     weights_list.append(weights)
-#                     new_last_processed_timestamp = max(new_last_processed_timestamp, timestamp_int)
-
-
-#         if not weights_list:
-#             logging.info(f"No new weights found since {last_processed_timestamp}.")
-#             return None, last_processed_timestamp
-        
-#         logging.info(f"Loaded weights from {len(weights_list)} files.")
-#         return weights_list, new_last_processed_timestamp
-
-#     except Exception as e:
-#         logging.error(f"Error loading weights: {e}")
-#         if 'temp_path' in locals() and os.path.exists(temp_path):
-#             os.unlink(temp_path)
-#         return None, last_processed_timestamp
 
 import logging
 import os
@@ -534,83 +478,6 @@ async def register(
     }
 
 
-# @app.get("/aggregate-weights")
-# async def aggregate_weights():
-#     db = next(get_db())
-#     try:
-#         model = get_model_architecture()
-#         if not model:
-#             raise HTTPException(status_code=500, detail="Failed to load model architecture")
-
-#         weights_list, num_examples_list, loss_list, new_timestamp = load_weights_from_blob(
-#             blob_service_client_client, 
-#             CLIENT_CONTAINER_NAME, 
-#             model, 
-#             global_vars['last_processed_timestamp']
-#         )
-
-#         if not weights_list:
-#             return {"status": "no_update", "message": "No new weights found", "num_clients": 0}
-#         if len(weights_list) < 2:
-#             return {"status": "no_update", "message": "Only 1 weight file found", "num_clients": 1}
-#         if not num_examples_list:
-#             print("Example counts missing for aggregation")
-#             logging.error("Example counts missing for aggregation")
-#             return None
-
-#         # global_vars['latest_version'] += 1
-#         # Synchronize latest version from the database
-#         latest_model = db.query(GlobalModel).order_by(GlobalModel.version.desc()).first()
-#         global_vars['latest_version'] = latest_model.version if latest_model else 0
-
-#         # Increment version
-#         global_vars['latest_version'] += 1
-#         # Ensure no duplicate version
-#         if db.query(GlobalModel).filter_by(version=global_vars['latest_version']).first():
-#             raise HTTPException(status_code=409, detail=f"Model with version {global_vars['latest_version']} already exists")
-
-#         filename = get_versioned_filename(global_vars['latest_version'])
-
-#         # avg_weights = federated_averaging(weights_list)
-#         logging.info(f"Aggregating weights from {len(weights_list)} clients")
-#         # avg_weights = federated_weighted_averaging(weights_list, num_examples_list, loss_list)
-#         epsilon = 0.5  # Privacy budget (0.1 == 0.5 inc in loss, lower value == high noise)
-#         sensitivity = 1.0  # Sensitivity
-#         avg_weights = federated_weighted_averaging_with_dp(weights_list, num_examples_list, loss_list, epsilon, sensitivity)
-#         logging.info(f"Aggregation completed.")
-#         if not avg_weights or not save_weights_to_blob(avg_weights, filename, model):
-#             raise HTTPException(status_code=500, detail="Failed to save aggregated weights")
-
-#         global_vars['last_processed_timestamp'] = new_timestamp
-        
-#         # Update database
-#         client_ids = [c.client_id for c in db.query(Client).all()]
-#         new_model = GlobalModel(
-#             version=global_vars['latest_version'],
-#             num_clients_contributed=len(weights_list),
-#             client_ids=",".join(client_ids)
-#         )
-#         db.add(new_model)
-        
-#         # Get the client IDs of the contributing clients
-#         contributing_client_ids = [client.client_id for client in db.query(Client).filter(Client.client_id.in_(client_ids)).all()]
-
-#         # Update contribution counts for only the contributing clients
-#         db.query(Client).filter(Client.client_id.in_(contributing_client_ids)).update(
-#             {"contribution_count": Client.contribution_count + 1},
-#             synchronize_session=False  # To avoid unnecessary session flush
-#         )
-#         db.commit()
-
-#         await manager.broadcast_model_update(f"NEW_MODEL:{filename}")
-#         return {
-#             "status": "success",
-#             "message": f"Aggregated weights saved as {filename}",
-#             "num_clients": len(weights_list)
-#         }
-#     except Exception as e:
-#         db.rollback()
-#         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/aggregate-weights")
 async def aggregate_weights():
