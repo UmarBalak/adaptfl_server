@@ -14,6 +14,7 @@ import re
 from sqlalchemy import func
 import uuid
 from fastapi import Body
+from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 
 load_dotenv(dotenv_path='.env')
@@ -25,7 +26,6 @@ from datetime import datetime
 
 # Database configuration
 DATABASE_URL = os.getenv("DATABASE_URL")  # Format: postgresql://user:password@host:port/database
-print(DATABASE_URL)
 if not DATABASE_URL:
     raise ValueError("DATABASE_URL environment variable is missing")
 global_vars = {
@@ -35,14 +35,8 @@ global_vars = {
 
 # SQLAlchemy setup
 engine = create_engine(DATABASE_URL)
-print("------------------------------")
-print("session created")
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-print("------------------------------")
-print("session created")
 Base = declarative_base()
-print("------------------------------")
-print("session created")
 
 # Association table for many-to-many relationship between GlobalModel and Client
 client_model_association = Table(
@@ -50,8 +44,6 @@ client_model_association = Table(
     Column('client_id', String, ForeignKey('clients.client_id')),
     Column('model_id', Integer, ForeignKey('global_models.id'))
 )
-print("------------------------------")
-print("session created")
 
 # Client model
 class Client(Base):
@@ -91,8 +83,7 @@ try:
     # Create tables
     Base.metadata.create_all(bind=engine)
 except Exception as e:
-    print("-----------------------------------")
-    print(f"yaha error hai {e}")
+    logging.error(f"Failed to create tables: {e}")
 
 
 # Database dependency
@@ -146,10 +137,6 @@ class ConnectionManager:
         # Clean up disconnected clients
         for client_id in disconnected_clients:
             await self.disconnect(client_id)
-
-# Initialize FastAPI app with connection manager
-manager = ConnectionManager()
-app = FastAPI()
 
 # Azure Blob Storage configuration
 CLIENT_ACCOUNT_URL = os.getenv("CLIENT_ACCOUNT_URL")
@@ -251,8 +238,6 @@ def load_weights_from_blob(
                     
                     # Fetch metadata from the blob
                     blob_metadata = blob_client.get_blob_properties().metadata
-                    print("---------------------------------------")
-                    print(blob_metadata)
                     if blob_metadata:
                         # Convert metadata values to appropriate types if necessary
                         num_examples = int(blob_metadata.get('num_examples', 0))
@@ -273,12 +258,7 @@ def load_weights_from_blob(
             logging.info(f"No new weights found since {last_processed_timestamp}.")
             return None, [], [], last_processed_timestamp
 
-        # if len(weights_list) < 2:
-        #     logging.info("Only 1 weight file is found.")
-        #     return None, [], [], last_processed_timestamp
-
         logging.info(f"Loaded weights from {len(weights_list)} files.")
-        print(num_examples_list)
         return weights_list, num_examples_list, loss_list, new_last_processed_timestamp
 
     except Exception as e:
@@ -440,11 +420,20 @@ def verify_admin(api_key: str):
     if api_key != admin_key:
         raise HTTPException(status_code=403, detail="Unauthorized admin access")
 
+# Initialize FastAPI app with connection manager
+manager = ConnectionManager()
+app = FastAPI()
 
 @app.get("/")
 async def root():
-    return "HELLO, WORLD"
+    return {"message": "HELLO, WORLD. Welcome to the Federated Learning Server!"}
 
+@app.get("/health", response_class=JSONResponse)
+async def health_check():
+    """
+    Health check endpoint to verify service availability.
+    """
+    return {"status": "healthy", "message": "The application is running successfully."}
 
 # Modified registration endpoint
 @app.post("/register")
@@ -503,7 +492,6 @@ async def aggregate_weights():
         if len(weights_list) < 2:
             return {"status": "no_update", "message": "Only 1 weight file found", "num_clients": 1}
         if not num_examples_list:
-            print("Example counts missing for aggregation")
             logging.error("Example counts missing for aggregation")
             return None
 
@@ -624,7 +612,7 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
 # Scheduler setup
 scheduler = BackgroundScheduler()
 
-@scheduler.scheduled_job(CronTrigger(minute="*/3"))
+@scheduler.scheduled_job(CronTrigger(minute="*/5"))
 def scheduled_aggregate_weights():
     """
     Scheduled task to aggregate weights every minute.
@@ -639,5 +627,5 @@ scheduler.start()
 
 # if __name__ == "__main__":
 #     import uvicorn
-#     print("Starting Server...")
+#     logging.info("Starting Server...")
 #     uvicorn.run(app, host="localhost", port=8000)
