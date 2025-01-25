@@ -426,7 +426,7 @@ app = FastAPI()
 
 @app.get("/")
 async def root():
-    return {"message": "HELLO, WORLD. Welcome to the Federated Learning Server!"}
+    return {"message": "HELLO, WORLD. Welcome to the AdaptFL Server!"}
 
 @app.get("/health", response_class=JSONResponse)
 async def health_check():
