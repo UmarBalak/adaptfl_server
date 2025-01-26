@@ -1,6 +1,7 @@
 import os
 import logging
 import numpy as np
+import time
 from typing import List, Optional, Dict
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends
 from azure.storage.blob import BlobServiceClient, BlobClient
@@ -683,11 +684,21 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
                     break
 
                 # Dynamically fetch the client's updated status and send updates if needed
-                updated_client = db.query(Client).filter(Client.client_id == client_id).first()
-                if updated_client and updated_client.status != client.status:
-                    client.status = updated_client.status
-                    db.commit()
-                    await websocket.send_text(f"Your updated status is: {client.status}")
+                retry_attempts = 3
+                for attempt in range(retry_attempts):
+                    try:
+                        updated_client = db.query(Client).filter(Client.client_id == client_id).first()
+                        if updated_client and updated_client.status != client.status:
+                            client.status = updated_client.status
+                            db.commit()
+                            await websocket.send_text(f"Your updated status is: {client.status}")
+                        break
+                    except SQLAlchemyError as db_error:
+                        logging.error(f"Attempt {attempt + 1} - Database error for client {client_id}: {db_error}", exc_info=True)
+                        if attempt < retry_attempts - 1:
+                            time.sleep(2)  # Wait before retrying
+                        else:
+                            raise
 
             except WebSocketDisconnect:
                 logging.info(f"Client {client_id} disconnected gracefully.")
