@@ -479,7 +479,14 @@ async def health_check():
     """
     Health check endpoint to verify service availability.
     """
-    return {"status": "healthy", "message": "The application is running successfully."}
+    return {"status": "healthy"}
+
+@app.head("/health", response_class=JSONResponse)
+async def health_check_monitor():
+    """
+    Health check endpoint to verify service availability.
+    """
+    return {"status": "healthy"}
 
 @app.get("/get_data/")
 async def get_all_data(db: Session = Depends(get_db)):
