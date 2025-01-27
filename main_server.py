@@ -259,7 +259,7 @@ def load_weights_from_blob(
             if match:
                 timestamp_str = match.group(1)
                 timestamp_int = int(timestamp_str.replace("_", ""))
-                if timestamp_int > int(last_processed_timestamp):
+                if timestamp_int > last_processed_timestamp:
                     blob_client = container_client.get_blob_client(blob.name)
                     
                     # Download the blob and load weights
