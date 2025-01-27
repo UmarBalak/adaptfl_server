@@ -524,231 +524,179 @@ async def register(
         "data": {"client_id": client_id, "api_key": api_key}
     }
 
-import traceback
+# @app.get("/aggregate-weights")
+# async def aggregate_weights():
+#     db = next(get_db())
+#     try:
+#         # Load last processed timestamp from the database
+#         last_processed_timestamp = int(load_last_processed_timestamp(db))
+#         global_vars['last_processed_timestamp'] = last_processed_timestamp or 0  # Use 0 if no timestamp is found
+
+#         model = get_model_architecture()
+#         if not model:
+#             raise HTTPException(status_code=500, detail="Failed to load model architecture")
+
+#         weights_list, num_examples_list, loss_list, new_timestamp = load_weights_from_blob(
+#             blob_service_client_client, 
+#             CLIENT_CONTAINER_NAME, 
+#             model, 
+#             global_vars['last_processed_timestamp']
+#         )
+
+#         if not weights_list:
+#             return {"status": "no_update", "message": "No new weights found", "num_clients": 0}
+#         if len(weights_list) < 2:
+#             return {"status": "no_update", "message": "Only 1 weight file found", "num_clients": 1}
+#         if not num_examples_list:
+#             print("Example counts missing for aggregation")
+#             logging.error("Example counts missing for aggregation")
+#             return None
+
+#         # Synchronize latest version from the database
+#         latest_model = db.query(GlobalModel).order_by(GlobalModel.version.desc()).first()
+#         global_vars['latest_version'] = latest_model.version if latest_model else 0
+
+#         # Increment version
+#         global_vars['latest_version'] += 1
+#         # Ensure no duplicate version
+#         if db.query(GlobalModel).filter_by(version=global_vars['latest_version']).first():
+#             raise HTTPException(status_code=409, detail=f"Model with version {global_vars['latest_version']} already exists")
+
+#         filename = get_versioned_filename(global_vars['latest_version'])
+
+#         logging.info(f"Aggregating weights from {len(weights_list)} clients")
+#         # epsilon = 0.5  # Privacy budget
+#         # sensitivity = 1.0  # Sensitivity
+#         # avg_weights = federated_weighted_averaging(weights_list, num_examples_list, loss_list, epsilon, sensitivity)
+#         avg_weights = federated_weighted_averaging(weights_list, num_examples_list, loss_list)
+#         logging.info(f"Aggregation completed.")
+#         if not avg_weights or not save_weights_to_blob(avg_weights, filename, model):
+#             raise HTTPException(status_code=500, detail="Failed to save aggregated weights")
+
+#         # Save the new timestamp to the database
+#         save_last_processed_timestamp(db, new_timestamp)
+
+#         # Update the database with model and client information
+#         client_ids = [c.client_id for c in db.query(Client).all()]
+#         new_model = GlobalModel(
+#             version=global_vars['latest_version'],
+#             num_clients_contributed=len(weights_list),
+#             client_ids=",".join(client_ids)
+#         )
+#         db.add(new_model)
+        
+#         # Get the client IDs of the contributing clients
+#         contributing_client_ids = [client.client_id for client in db.query(Client).filter(Client.client_id.in_(client_ids)).all()]
+
+#         # Update contribution counts for only the contributing clients
+#         db.query(Client).filter(Client.client_id.in_(contributing_client_ids)).update(
+#             {"contribution_count": Client.contribution_count + 1},
+#             synchronize_session=False  # To avoid unnecessary session flush
+#         )
+#         db.commit()
+
+#         await manager.broadcast_model_update(f"NEW_MODEL:{filename}")
+#         return {
+#             "status": "success",
+#             "message": f"Aggregated weights saved as {filename}",
+#             "num_clients": len(weights_list)
+#         }
+#     except Exception as e:
+#         db.rollback()
+#         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/aggregate-weights")
 async def aggregate_weights():
     db = next(get_db())
     try:
-        logging.info("Starting aggregation process.")
-        
         # Load last processed timestamp from the database
-        try:
-            last_processed_timestamp = int(load_last_processed_timestamp(db))
-        except Exception as e:
-            logging.error(f"Failed to load last processed timestamp: {e}")
-            last_processed_timestamp = 0  # Fallback to default
-        global_vars['last_processed_timestamp'] = last_processed_timestamp
+        last_processed_timestamp = int(load_last_processed_timestamp(db))
+        global_vars['last_processed_timestamp'] = last_processed_timestamp or 0  # Use 0 if no timestamp is found
+        logging.info(f"Loaded last processed timestamp: {global_vars['last_processed_timestamp']}")
 
-        # Load model architecture
-        try:
-            model = get_model_architecture()
-            if not model:
-                raise ValueError("Model architecture is None")
-        except Exception as e:
-            logging.error(f"Failed to load model architecture: {e}")
-            raise HTTPException(status_code=500, detail="Error loading model architecture")
-        
-        # Load weights from blob
-        try:
-            weights_list, num_examples_list, loss_list, new_timestamp, contributing_client_ids = load_weights_from_blob(
-                blob_service_client_client,
-                CLIENT_CONTAINER_NAME,
-                model,
-                global_vars['last_processed_timestamp']
-            )
-        except Exception as e:
-            logging.error(f"Error loading weights from blob: {traceback.format_exc()}")
-            raise HTTPException(status_code=500, detail="Error loading weights from blob")
-        
+        model = get_model_architecture()
+        if not model:
+            logging.critical("Failed to load model architecture")
+            raise HTTPException(status_code=500, detail="Failed to load model architecture")
+
+        weights_list, num_examples_list, loss_list, new_timestamp = load_weights_from_blob(
+            blob_service_client_client, 
+            CLIENT_CONTAINER_NAME, 
+            model, 
+            global_vars['last_processed_timestamp']
+        )
+
         if not weights_list:
-            logging.info("No new weights found.")
+            logging.info("No new weights found in the blob")
             return {"status": "no_update", "message": "No new weights found", "num_clients": 0}
         if len(weights_list) < 2:
-            logging.info("Insufficient weight files for aggregation.")
+            logging.info("Insufficient weights for aggregation (only 1 weight file found)")
             return {"status": "no_update", "message": "Only 1 weight file found", "num_clients": 1}
         if not num_examples_list:
-            logging.error("Missing example counts for aggregation.")
-            raise HTTPException(status_code=500, detail="Example counts missing for aggregation")
+            logging.error("Example counts are missing, cannot perform aggregation")
+            return {"status": "error", "message": "Example counts missing for aggregation"}
 
-        logging.info(f"Contributing clients: {contributing_client_ids}")
+        # Synchronize latest version from the database
+        latest_model = db.query(GlobalModel).order_by(GlobalModel.version.desc()).first()
+        global_vars['latest_version'] = latest_model.version if latest_model else 0
+        logging.info(f"Latest model version loaded: {global_vars['latest_version']}")
 
-        # Increment and validate version
-        try:
-            latest_model = db.query(GlobalModel).order_by(GlobalModel.version.desc()).first()
-            global_vars['latest_version'] = (latest_model.version if latest_model else 0) + 1
-
-            if db.query(GlobalModel).filter_by(version=global_vars['latest_version']).first():
-                raise ValueError(f"Duplicate model version {global_vars['latest_version']}")
-        except Exception as e:
-            logging.error(f"Error validating model version: {e}")
-            raise HTTPException(status_code=500, detail="Error managing model versions")
+        # Increment version
+        global_vars['latest_version'] += 1
+        if db.query(GlobalModel).filter_by(version=global_vars['latest_version']).first():
+            logging.error(f"Duplicate model version detected: {global_vars['latest_version']}")
+            raise HTTPException(status_code=409, detail=f"Model with version {global_vars['latest_version']} already exists")
 
         filename = get_versioned_filename(global_vars['latest_version'])
+        logging.info(f"Preparing to save aggregated weights as: {filename}")
 
-        # Aggregate weights
-        try:
-            logging.info(f"Aggregating weights from {len(weights_list)} clients.")
-            avg_weights = federated_weighted_averaging(weights_list, num_examples_list, loss_list)
-            if not avg_weights:
-                raise ValueError("Aggregated weights are None")
-        except Exception as e:
-            logging.error(f"Error during weight aggregation: {traceback.format_exc()}")
-            raise HTTPException(status_code=500, detail="Error during weight aggregation")
+        logging.info(f"Aggregating weights from {len(weights_list)} clients")
+        avg_weights = federated_weighted_averaging(weights_list, num_examples_list, loss_list)
+        logging.info("Aggregation completed successfully.")
 
-        # Save aggregated weights
-        try:
-            if not save_weights_to_blob(avg_weights, filename, model):
-                raise ValueError("Failed to save weights to blob")
-        except Exception as e:
-            logging.error(f"Error saving aggregated weights: {e}")
-            raise HTTPException(status_code=500, detail="Error saving aggregated weights")
+        if not avg_weights or not save_weights_to_blob(avg_weights, filename, model):
+            logging.critical("Failed to save aggregated weights to blob")
+            raise HTTPException(status_code=500, detail="Failed to save aggregated weights")
 
-        # Save the new timestamp
-        try:
-            save_last_processed_timestamp(db, new_timestamp)
-        except Exception as e:
-            logging.error(f"Error saving last processed timestamp: {e}")
-            raise HTTPException(status_code=500, detail="Error saving timestamp")
+        # Save the new timestamp to the database
+        save_last_processed_timestamp(db, new_timestamp)
+        logging.info(f"New timestamp saved to the database: {new_timestamp}")
 
-        # Update client contribution counts
-        try:
-            db.query(Client).filter(Client.client_id.in_(contributing_client_ids)).update(
-                {"contribution_count": Client.contribution_count + 1},
-                synchronize_session=False
-            )
-            db.commit()
-        except Exception as e:
-            logging.error(f"Error updating client contributions: {e}")
-            db.rollback()
-            raise HTTPException(status_code=500, detail="Error updating client contributions")
+        # Update the database with model and client information
+        client_ids = [c.client_id for c in db.query(Client).all()]
+        new_model = GlobalModel(
+            version=global_vars['latest_version'],
+            num_clients_contributed=len(weights_list),
+            client_ids=",".join(client_ids)
+        )
+        db.add(new_model)
 
-        # Update global model information
-        try:
-            new_model = GlobalModel(
-                version=global_vars['latest_version'],
-                num_clients_contributed=len(contributing_client_ids),
-                client_ids=",".join(contributing_client_ids)
-            )
-            db.add(new_model)
-            db.commit()
-        except Exception as e:
-            logging.error(f"Error saving global model information: {e}")
-            db.rollback()
-            raise HTTPException(status_code=500, detail="Error saving global model information")
+        contributing_client_ids = [client.client_id for client in db.query(Client).filter(Client.client_id.in_(client_ids)).all()]
+        db.query(Client).filter(Client.client_id.in_(contributing_client_ids)).update(
+            {"contribution_count": Client.contribution_count + 1},
+            synchronize_session=False
+        )
+        db.commit()
+        logging.info(f"Model version {global_vars['latest_version']} saved and database updated")
 
         # Notify clients of new model
-        try:
-            await manager.broadcast_model_update(f"NEW_MODEL:{filename}")
-        except Exception as e:
-            logging.error(f"Error broadcasting model update: {e}")
+        await manager.broadcast_model_update(f"NEW_MODEL:{filename}")
+        logging.info(f"Clients notified of new model: {filename}")
 
-        logging.info(f"Aggregation process completed successfully. Model saved as {filename}.")
         return {
             "status": "success",
             "message": f"Aggregated weights saved as {filename}",
-            "num_clients": len(contributing_client_ids)
+            "num_clients": len(weights_list)
         }
     except HTTPException as http_exc:
-        logging.error(f"HTTPException: {http_exc.detail}")
+        logging.error(f"HTTP Exception: {http_exc.detail}")
+        db.rollback()
         raise
     except Exception as e:
-        logging.error(f"Unexpected error: {traceback.format_exc()}")
+        logging.exception("Unexpected error during aggregation")
         db.rollback()
-        raise HTTPException(status_code=500, detail="Internal server error")
-    finally:
-        db.close()
+        raise HTTPException(status_code=500, detail="An unexpected error occurred") from e
 
-# @app.websocket("/ws/{client_id}") 
-# async def websocket_endpoint(websocket: WebSocket, client_id: str):
-#     db = SessionLocal()  # Direct session creation
-#     try:
-#         # Check if the client exists in the database
-#         client = db.query(Client).filter(Client.client_id == client_id).first()
-#         if not client:
-#             await websocket.close(code=1008, reason="Unauthorized")
-#             logging.warning(f"Unauthorized access attempt by client {client_id}.")
-#             return
-
-#         # Add the client to the WebSocket manager and update status
-#         await manager.connect(client_id, websocket)
-#         client.status = "Active"
-#         db.commit()
-#         logging.info(f"Client {client_id} connected successfully, status updated to 'Active'.")
-
-#         # Inform the client about their updated status
-#         await websocket.send_text(f"Your status is now: {client.status}")
-
-#         latest_model = db.query(GlobalModel).order_by(GlobalModel.version.desc()).first()
-#         global_vars['latest_version'] = latest_model.version if latest_model else 0
-
-#         # Send the latest model version to the client
-#         latest_model_version = f"g{global_vars['latest_version']}.keras"
-#         await websocket.send_text(f"LATEST_MODEL:{latest_model_version}")
-
-#         while True:
-#             try:
-#                 # Receive and handle messages from the client
-#                 data = await websocket.receive_text()
-
-#                 if not data:
-#                     break
-
-#                 # Dynamically fetch the client's updated status and send updates if needed
-#                 retry_attempts = 3
-#                 for attempt in range(retry_attempts):
-#                     try:
-#                         updated_client = db.query(Client).filter(Client.client_id == client_id).first()
-#                         if updated_client and updated_client.status != client.status:
-#                             client.status = updated_client.status
-#                             db.commit()
-#                             await websocket.send_text(f"Your updated status is: {client.status}")
-#                         break
-#                     except SQLAlchemyError as db_error:
-#                         logging.error(f"Attempt {attempt + 1} - Database error for client {client_id}: {db_error}", exc_info=True)
-#                         if attempt < retry_attempts - 1:
-#                             time.sleep(2)  # Wait before retrying
-#                         else:
-#                             raise
-
-#             except WebSocketDisconnect:
-#                 logging.info(f"Client {client_id} disconnected gracefully.")
-#                 break  # Exit loop on graceful disconnect
-#             except Exception as inner_error:
-#                 logging.error(f"Error handling message from client {client_id}: {inner_error}", exc_info=True)
-#                 await websocket.send_text("An error occurred. Please try again later.")
-#                 break
-
-#     except SQLAlchemyError as db_error:
-#         # Handle specific database errors
-#         logging.error(f"Database error for client {client_id}: {db_error}", exc_info=True)
-#         await websocket.close(code=1002, reason="Database error.")
-#     except WebSocketDisconnect:
-#         logging.info(f"Client {client_id} disconnected unexpectedly.")
-#     except HTTPException as http_error:
-#         # Catch HTTP exceptions (like 400, 404 errors) if needed
-#         logging.error(f"HTTP error for client {client_id}: {http_error}", exc_info=True)
-#     except Exception as e:
-#         # Catch all other exceptions
-#         logging.error(f"Unexpected error for client {client_id}: {e}", exc_info=True)
-#         await websocket.close(code=1000, reason="Internal server error.")
-#     finally:
-#         # Cleanup: Disconnect the client and update the database
-#         try:
-#             await manager.disconnect(client_id)
-#             # Update status to "Inactive"
-#             client = db.query(Client).filter(Client.client_id == client_id).first()
-#             if client:
-#                 client.status = "Inactive"
-#                 db.commit()
-#                 logging.info(f"Client {client_id} is now inactive. Db updated successfully!")
-#         except SQLAlchemyError as db_error:
-#             logging.error(f"Error updating status for client {client_id} in the database: {db_error}", exc_info=True)
-#         except Exception as e:
-#             logging.error(f"Error during final cleanup for client {client_id}: {e}", exc_info=True)
-#         finally:
-#             db.close()  # Ensure database session is always closed
-#             logging.info(f"Database session closed for client {client_id}.")
 
 @app.websocket("/ws/{client_id}")
 async def websocket_endpoint(websocket: WebSocket, client_id: str):
