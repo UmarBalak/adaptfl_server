@@ -259,6 +259,8 @@ def load_weights_from_blob(
             if match:
                 timestamp_str = match.group(1)
                 timestamp_int = int(timestamp_str.replace("_", ""))
+                print(type(timestamp_int), timestamp_int)
+                print(type(last_processed_timestamp), last_processed_timestamp)
                 if timestamp_int > last_processed_timestamp:
                     blob_client = container_client.get_blob_client(blob.name)
                     
@@ -612,7 +614,7 @@ async def aggregate_weights():
     db = next(get_db())
     try:
         # Load last processed timestamp from the database
-        last_processed_timestamp = load_last_processed_timestamp(db)
+        last_processed_timestamp = int(load_last_processed_timestamp(db))
         global_vars['last_processed_timestamp'] = last_processed_timestamp or 0  # Use 0 if no timestamp is found
 
         model = get_model_architecture()
