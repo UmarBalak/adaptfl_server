@@ -29,6 +29,7 @@ load_dotenv(dotenv_path='.env')
 
 import os
 from sqlalchemy import create_engine, Column, String, DateTime, Table, Integer, ForeignKey, select
+from sqlalchemy.exc import SQLAlchemyError, OperationalError
 from sqlalchemy.orm import sessionmaker, Session, relationship, declarative_base
 from sqlalchemy.exc import SQLAlchemyError
 from datetime import datetime
@@ -305,8 +306,17 @@ def load_weights_from_blob(
 
 # Load the last processed timestamp from the database
 def load_last_processed_timestamp(db):
-    timestamp = db.query(GlobalVars).filter_by(key="last_processed_timestamp").first()
-    return timestamp.value if timestamp else None
+    retry_attempts = 3
+    for attempt in range(retry_attempts):
+        try:
+            timestamp = db.query(GlobalVars).filter_by(key="last_processed_timestamp").first()
+            return timestamp.value if timestamp else None
+        except OperationalError as db_error:
+            logging.error(f"Attempt {attempt + 1} - Database error: {db_error}", exc_info=True)
+            if attempt < retry_attempts - 1:
+                time.sleep(2)  # Wait before retrying
+            else:
+                raise
 
 # Save the last processed timestamp to the database
 def save_last_processed_timestamp(db, new_timestamp):
@@ -524,87 +534,6 @@ async def register(
         "data": {"client_id": client_id, "api_key": api_key}
     }
 
-# @app.get("/aggregate-weights")
-# async def aggregate_weights():
-#     db = next(get_db())
-#     try:
-#         # Load last processed timestamp from the database
-#         last_processed_timestamp = int(load_last_processed_timestamp(db))
-#         global_vars['last_processed_timestamp'] = last_processed_timestamp or 0  # Use 0 if no timestamp is found
-
-#         model = get_model_architecture()
-#         if not model:
-#             raise HTTPException(status_code=500, detail="Failed to load model architecture")
-
-#         weights_list, num_examples_list, loss_list, new_timestamp = load_weights_from_blob(
-#             blob_service_client_client, 
-#             CLIENT_CONTAINER_NAME, 
-#             model, 
-#             global_vars['last_processed_timestamp']
-#         )
-
-#         if not weights_list:
-#             return {"status": "no_update", "message": "No new weights found", "num_clients": 0}
-#         if len(weights_list) < 2:
-#             return {"status": "no_update", "message": "Only 1 weight file found", "num_clients": 1}
-#         if not num_examples_list:
-#             print("Example counts missing for aggregation")
-#             logging.error("Example counts missing for aggregation")
-#             return None
-
-#         # Synchronize latest version from the database
-#         latest_model = db.query(GlobalModel).order_by(GlobalModel.version.desc()).first()
-#         global_vars['latest_version'] = latest_model.version if latest_model else 0
-
-#         # Increment version
-#         global_vars['latest_version'] += 1
-#         # Ensure no duplicate version
-#         if db.query(GlobalModel).filter_by(version=global_vars['latest_version']).first():
-#             raise HTTPException(status_code=409, detail=f"Model with version {global_vars['latest_version']} already exists")
-
-#         filename = get_versioned_filename(global_vars['latest_version'])
-
-#         logging.info(f"Aggregating weights from {len(weights_list)} clients")
-#         # epsilon = 0.5  # Privacy budget
-#         # sensitivity = 1.0  # Sensitivity
-#         # avg_weights = federated_weighted_averaging(weights_list, num_examples_list, loss_list, epsilon, sensitivity)
-#         avg_weights = federated_weighted_averaging(weights_list, num_examples_list, loss_list)
-#         logging.info(f"Aggregation completed.")
-#         if not avg_weights or not save_weights_to_blob(avg_weights, filename, model):
-#             raise HTTPException(status_code=500, detail="Failed to save aggregated weights")
-
-#         # Save the new timestamp to the database
-#         save_last_processed_timestamp(db, new_timestamp)
-
-#         # Update the database with model and client information
-#         client_ids = [c.client_id for c in db.query(Client).all()]
-#         new_model = GlobalModel(
-#             version=global_vars['latest_version'],
-#             num_clients_contributed=len(weights_list),
-#             client_ids=",".join(client_ids)
-#         )
-#         db.add(new_model)
-        
-#         # Get the client IDs of the contributing clients
-#         contributing_client_ids = [client.client_id for client in db.query(Client).filter(Client.client_id.in_(client_ids)).all()]
-
-#         # Update contribution counts for only the contributing clients
-#         db.query(Client).filter(Client.client_id.in_(contributing_client_ids)).update(
-#             {"contribution_count": Client.contribution_count + 1},
-#             synchronize_session=False  # To avoid unnecessary session flush
-#         )
-#         db.commit()
-
-#         await manager.broadcast_model_update(f"NEW_MODEL:{filename}")
-#         return {
-#             "status": "success",
-#             "message": f"Aggregated weights saved as {filename}",
-#             "num_clients": len(weights_list)
-#         }
-#     except Exception as e:
-#         db.rollback()
-#         raise HTTPException(status_code=500, detail=str(e))
-
 @app.get("/aggregate-weights")
 async def aggregate_weights():
     db = next(get_db())
@@ -688,6 +617,10 @@ async def aggregate_weights():
             "message": f"Aggregated weights saved as {filename}",
             "num_clients": len(weights_list)
         }
+    except SQLAlchemyError as db_error:
+        logging.error(f"Database error during aggregation: {db_error}", exc_info=True)
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Database error occurred") from db_error
     except HTTPException as http_exc:
         logging.error(f"HTTP Exception: {http_exc.detail}")
         db.rollback()
@@ -696,6 +629,8 @@ async def aggregate_weights():
         logging.exception("Unexpected error during aggregation")
         db.rollback()
         raise HTTPException(status_code=500, detail="An unexpected error occurred") from e
+    finally:
+        db.close()
 
 
 @app.websocket("/ws/{client_id}")
@@ -812,7 +747,7 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
 # Scheduler setup
 scheduler = BackgroundScheduler()
 
-@scheduler.scheduled_job(CronTrigger(minute="*/10"))
+@scheduler.scheduled_job(CronTrigger(minute="*/5"))
 def scheduled_aggregate_weights():
     """
     Scheduled task to aggregate weights every minute.
