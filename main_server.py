@@ -117,21 +117,56 @@ logging.basicConfig(
     ]
 )
 
+# class ConnectionManager:
+#     def __init__(self):
+#         self.active_connections: Dict[str, WebSocket] = {}
+
+#     async def connect(self, client_id: str, websocket: WebSocket):
+
+#         await websocket.accept()
+#         self.active_connections[client_id] = websocket
+
+#         logging.info(f"Client {client_id} connected. Total connections: {len(self.active_connections)}")
+
+#     async def disconnect(self, client_id: str):
+#         if client_id in self.active_connections:
+#             del self.active_connections[client_id]
+#             logging.info(f"Client {client_id} disconnected. Total connections: {len(self.active_connections)}")
+
+#     async def broadcast_model_update(self, message: str):
+#         disconnected_clients = []
+#         for client_id, connection in self.active_connections.items():
+#             try:
+#                 await connection.send_text(message)
+#                 logging.info(f"Update notification sent to client {client_id}")
+#             except Exception as e:
+#                 logging.error(f"Failed to send update to client {client_id}: {e}")
+#                 disconnected_clients.append(client_id)
+        
+#         # Clean up disconnected clients
+#         for client_id in disconnected_clients:
+#             await self.disconnect(client_id)
+
 class ConnectionManager:
     def __init__(self):
         self.active_connections: Dict[str, WebSocket] = {}
 
     async def connect(self, client_id: str, websocket: WebSocket):
-
         await websocket.accept()
         self.active_connections[client_id] = websocket
-
         logging.info(f"Client {client_id} connected. Total connections: {len(self.active_connections)}")
 
     async def disconnect(self, client_id: str):
-        if client_id in self.active_connections:
-            del self.active_connections[client_id]
-            logging.info(f"Client {client_id} disconnected. Total connections: {len(self.active_connections)}")
+        for attempt in range(3):
+            try:
+                if client_id in self.active_connections:
+                    del self.active_connections[client_id]
+                    logging.info(f"Client {client_id} disconnected. Total connections: {len(self.active_connections)}")
+                break
+            except Exception as e:
+                logging.error(f"Attempt {attempt + 1} - Error disconnecting client {client_id}: {e}")
+                if attempt < 2:
+                    time.sleep(2)
 
     async def broadcast_model_update(self, message: str):
         disconnected_clients = []
@@ -142,7 +177,7 @@ class ConnectionManager:
             except Exception as e:
                 logging.error(f"Failed to send update to client {client_id}: {e}")
                 disconnected_clients.append(client_id)
-        
+
         # Clean up disconnected clients
         for client_id in disconnected_clients:
             await self.disconnect(client_id)
@@ -648,9 +683,101 @@ async def aggregate_weights():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.websocket("/ws/{client_id}") 
+# @app.websocket("/ws/{client_id}") 
+# async def websocket_endpoint(websocket: WebSocket, client_id: str):
+#     db = SessionLocal()  # Direct session creation
+#     try:
+#         # Check if the client exists in the database
+#         client = db.query(Client).filter(Client.client_id == client_id).first()
+#         if not client:
+#             await websocket.close(code=1008, reason="Unauthorized")
+#             logging.warning(f"Unauthorized access attempt by client {client_id}.")
+#             return
+
+#         # Add the client to the WebSocket manager and update status
+#         await manager.connect(client_id, websocket)
+#         client.status = "Active"
+#         db.commit()
+#         logging.info(f"Client {client_id} connected successfully, status updated to 'Active'.")
+
+#         # Inform the client about their updated status
+#         await websocket.send_text(f"Your status is now: {client.status}")
+
+#         latest_model = db.query(GlobalModel).order_by(GlobalModel.version.desc()).first()
+#         global_vars['latest_version'] = latest_model.version if latest_model else 0
+
+#         # Send the latest model version to the client
+#         latest_model_version = f"g{global_vars['latest_version']}.keras"
+#         await websocket.send_text(f"LATEST_MODEL:{latest_model_version}")
+
+#         while True:
+#             try:
+#                 # Receive and handle messages from the client
+#                 data = await websocket.receive_text()
+
+#                 if not data:
+#                     break
+
+#                 # Dynamically fetch the client's updated status and send updates if needed
+#                 retry_attempts = 3
+#                 for attempt in range(retry_attempts):
+#                     try:
+#                         updated_client = db.query(Client).filter(Client.client_id == client_id).first()
+#                         if updated_client and updated_client.status != client.status:
+#                             client.status = updated_client.status
+#                             db.commit()
+#                             await websocket.send_text(f"Your updated status is: {client.status}")
+#                         break
+#                     except SQLAlchemyError as db_error:
+#                         logging.error(f"Attempt {attempt + 1} - Database error for client {client_id}: {db_error}", exc_info=True)
+#                         if attempt < retry_attempts - 1:
+#                             time.sleep(2)  # Wait before retrying
+#                         else:
+#                             raise
+
+#             except WebSocketDisconnect:
+#                 logging.info(f"Client {client_id} disconnected gracefully.")
+#                 break  # Exit loop on graceful disconnect
+#             except Exception as inner_error:
+#                 logging.error(f"Error handling message from client {client_id}: {inner_error}", exc_info=True)
+#                 await websocket.send_text("An error occurred. Please try again later.")
+#                 break
+
+#     except SQLAlchemyError as db_error:
+#         # Handle specific database errors
+#         logging.error(f"Database error for client {client_id}: {db_error}", exc_info=True)
+#         await websocket.close(code=1002, reason="Database error.")
+#     except WebSocketDisconnect:
+#         logging.info(f"Client {client_id} disconnected unexpectedly.")
+#     except HTTPException as http_error:
+#         # Catch HTTP exceptions (like 400, 404 errors) if needed
+#         logging.error(f"HTTP error for client {client_id}: {http_error}", exc_info=True)
+#     except Exception as e:
+#         # Catch all other exceptions
+#         logging.error(f"Unexpected error for client {client_id}: {e}", exc_info=True)
+#         await websocket.close(code=1000, reason="Internal server error.")
+#     finally:
+#         # Cleanup: Disconnect the client and update the database
+#         try:
+#             await manager.disconnect(client_id)
+#             # Update status to "Inactive"
+#             client = db.query(Client).filter(Client.client_id == client_id).first()
+#             if client:
+#                 client.status = "Inactive"
+#                 db.commit()
+#                 logging.info(f"Client {client_id} is now inactive. Db updated successfully!")
+#         except SQLAlchemyError as db_error:
+#             logging.error(f"Error updating status for client {client_id} in the database: {db_error}", exc_info=True)
+#         except Exception as e:
+#             logging.error(f"Error during final cleanup for client {client_id}: {e}", exc_info=True)
+#         finally:
+#             db.close()  # Ensure database session is always closed
+#             logging.info(f"Database session closed for client {client_id}.")
+
+@app.websocket("/ws/{client_id}")
 async def websocket_endpoint(websocket: WebSocket, client_id: str):
     db = SessionLocal()  # Direct session creation
+    retry_attempts = 3
     try:
         # Check if the client exists in the database
         client = db.query(Client).filter(Client.client_id == client_id).first()
@@ -661,30 +788,38 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
 
         # Add the client to the WebSocket manager and update status
         await manager.connect(client_id, websocket)
-        client.status = "Active"
-        db.commit()
-        logging.info(f"Client {client_id} connected successfully, status updated to 'Active'.")
+
+        # Retry updating the status to "Active" if an error occurs
+        for attempt in range(retry_attempts):
+            try:
+                client.status = "Active"
+                db.commit()
+                logging.info(f"Client {client_id} connected successfully, status updated to 'Active'.")
+                break
+            except SQLAlchemyError as db_error:
+                logging.error(f"Attempt {attempt + 1} - Failed to update 'Active' status for {client_id}: {db_error}")
+                if attempt < retry_attempts - 1:
+                    time.sleep(2)
+                else:
+                    raise
 
         # Inform the client about their updated status
         await websocket.send_text(f"Your status is now: {client.status}")
 
+        # Get the latest model version and send to the client
         latest_model = db.query(GlobalModel).order_by(GlobalModel.version.desc()).first()
         global_vars['latest_version'] = latest_model.version if latest_model else 0
-
-        # Send the latest model version to the client
         latest_model_version = f"g{global_vars['latest_version']}.keras"
         await websocket.send_text(f"LATEST_MODEL:{latest_model_version}")
 
         while True:
             try:
-                # Receive and handle messages from the client
+                # Handle messages from the client
                 data = await websocket.receive_text()
-
                 if not data:
                     break
 
-                # Dynamically fetch the client's updated status and send updates if needed
-                retry_attempts = 3
+                # Update and notify client if status changes
                 for attempt in range(retry_attempts):
                     try:
                         updated_client = db.query(Client).filter(Client.client_id == client_id).first()
@@ -694,50 +829,60 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
                             await websocket.send_text(f"Your updated status is: {client.status}")
                         break
                     except SQLAlchemyError as db_error:
-                        logging.error(f"Attempt {attempt + 1} - Database error for client {client_id}: {db_error}", exc_info=True)
+                        logging.error(f"Attempt {attempt + 1} - Database error for client {client_id}: {db_error}")
                         if attempt < retry_attempts - 1:
-                            time.sleep(2)  # Wait before retrying
+                            time.sleep(2)
                         else:
                             raise
 
             except WebSocketDisconnect:
                 logging.info(f"Client {client_id} disconnected gracefully.")
-                break  # Exit loop on graceful disconnect
-            except Exception as inner_error:
-                logging.error(f"Error handling message from client {client_id}: {inner_error}", exc_info=True)
+                break  # Exit loop on disconnect
+            except Exception as e:
+                logging.error(f"Error handling message from client {client_id}: {e}")
                 await websocket.send_text("An error occurred. Please try again later.")
                 break
 
     except SQLAlchemyError as db_error:
-        # Handle specific database errors
         logging.error(f"Database error for client {client_id}: {db_error}", exc_info=True)
         await websocket.close(code=1002, reason="Database error.")
     except WebSocketDisconnect:
         logging.info(f"Client {client_id} disconnected unexpectedly.")
-    except HTTPException as http_error:
-        # Catch HTTP exceptions (like 400, 404 errors) if needed
-        logging.error(f"HTTP error for client {client_id}: {http_error}", exc_info=True)
     except Exception as e:
-        # Catch all other exceptions
         logging.error(f"Unexpected error for client {client_id}: {e}", exc_info=True)
         await websocket.close(code=1000, reason="Internal server error.")
     finally:
         # Cleanup: Disconnect the client and update the database
-        try:
-            await manager.disconnect(client_id)
-            # Update status to "Inactive"
-            client = db.query(Client).filter(Client.client_id == client_id).first()
-            if client:
-                client.status = "Inactive"
-                db.commit()
-                logging.info(f"Client {client_id} is now inactive. Db updated successfully!")
-        except SQLAlchemyError as db_error:
-            logging.error(f"Error updating status for client {client_id} in the database: {db_error}", exc_info=True)
-        except Exception as e:
-            logging.error(f"Error during final cleanup for client {client_id}: {e}", exc_info=True)
-        finally:
-            db.close()  # Ensure database session is always closed
-            logging.info(f"Database session closed for client {client_id}.")
+        for attempt in range(retry_attempts):
+            try:
+                await manager.disconnect(client_id)
+                break
+            except Exception as e:
+                logging.error(f"Attempt {attempt + 1} - Failed to disconnect client {client_id}: {e}")
+                if attempt < retry_attempts - 1:
+                    time.sleep(2)
+
+        for attempt in range(retry_attempts):
+            try:
+                client = db.query(Client).filter(Client.client_id == client_id).first()
+                if client:
+                    client.status = "Inactive"
+                    db.commit()
+                    logging.info(f"Client {client_id} is now inactive. DB updated successfully.")
+                break
+            except SQLAlchemyError as db_error:
+                logging.error(f"Attempt {attempt + 1} - Failed to update 'Inactive' status for {client_id}: {db_error}")
+                if attempt < retry_attempts - 1:
+                    time.sleep(2)
+                else:
+                    raise
+            except Exception as e:
+                logging.error(f"Attempt {attempt + 1} - Unexpected error during cleanup for {client_id}: {e}")
+                if attempt < retry_attempts - 1:
+                    time.sleep(2)
+
+        db.close()  # Ensure database session is always closed
+        logging.info(f"Database session closed for client {client_id}.")
 
 
 # Scheduler setup
