@@ -259,8 +259,6 @@ def load_weights_from_blob(
             if match:
                 timestamp_str = match.group(1)
                 timestamp_int = int(timestamp_str.replace("_", ""))
-                print(type(timestamp_int), timestamp_int)
-                print(type(last_processed_timestamp), last_processed_timestamp)
                 if timestamp_int > last_processed_timestamp:
                     blob_client = container_client.get_blob_client(blob.name)
                     
@@ -526,164 +524,140 @@ async def register(
         "data": {"client_id": client_id, "api_key": api_key}
     }
 
-
-
-# @app.get("/aggregate-weights")
-# async def aggregate_weights():
-#     db = next(get_db())
-#     try:
-#         # Load last processed timestamp from the database
-#         last_processed_timestamp = load_last_processed_timestamp(db)
-#         global_vars['last_processed_timestamp'] = last_processed_timestamp or 0  # Use 0 if no timestamp is found
-
-#         model = get_model_architecture()
-#         if not model:
-#             raise HTTPException(status_code=500, detail="Failed to load model architecture")
-
-#         weights_list, num_examples_list, loss_list, new_timestamp = load_weights_from_blob(
-#             blob_service_client_client, 
-#             CLIENT_CONTAINER_NAME, 
-#             model, 
-#             global_vars['last_processed_timestamp']
-#         )
-
-#         if not weights_list:
-#             return {"status": "no_update", "message": "No new weights found", "num_clients": 0}
-#         if len(weights_list) < 2:
-#             return {"status": "no_update", "message": "Only 1 weight file found", "num_clients": 1}
-#         if not num_examples_list:
-#             logging.error("Example counts missing for aggregation")
-#             return None
-
-#         # global_vars['latest_version'] += 1
-#         # Synchronize latest version from the database
-#         latest_model = db.query(GlobalModel).order_by(GlobalModel.version.desc()).first()
-#         global_vars['latest_version'] = latest_model.version if latest_model else 0
-
-#         # Increment version
-#         global_vars['latest_version'] += 1
-#         # Ensure no duplicate version
-#         if db.query(GlobalModel).filter_by(version=global_vars['latest_version']).first():
-#             raise HTTPException(status_code=409, detail=f"Model with version {global_vars['latest_version']} already exists")
-
-#         filename = get_versioned_filename(global_vars['latest_version'])
-
-#         logging.info(f"Aggregating weights from {len(weights_list)} clients")
-#         # epsilon = 0.5  # Privacy budget
-#         # sensitivity = 1.0  # Sensitivity
-#         # avg_weights = federated_weighted_averaging(weights_list, num_examples_list, loss_list, epsilon, sensitivity)
-#         avg_weights = federated_weighted_averaging(weights_list, num_examples_list, loss_list)
-#         logging.info(f"Aggregation completed.")
-#         if not avg_weights or not save_weights_to_blob(avg_weights, filename, model):
-#             raise HTTPException(status_code=500, detail="Failed to save aggregated weights")
-
-#         # Save the new timestamp to the database
-#         save_last_processed_timestamp(db, new_timestamp)
-
-#         # Update the database with model and client information
-#         client_ids = [c.client_id for c in db.query(Client).all()]
-#         new_model = GlobalModel(
-#             version=global_vars['latest_version'],
-#             num_clients_contributed=len(weights_list),
-#             client_ids=",".join(client_ids)
-#         )
-#         db.add(new_model)
-        
-#         # Get the client IDs of the contributing clients
-#         contributing_client_ids = [client.client_id for client in db.query(Client).filter(Client.client_id.in_(client_ids)).all()]
-
-#         # Update contribution counts for only the contributing clients
-#         db.query(Client).filter(Client.client_id.in_(contributing_client_ids)).update(
-#             {"contribution_count": Client.contribution_count + 1},
-#             synchronize_session=False  # To avoid unnecessary session flush
-#         )
-#         db.commit()
-
-#         await manager.broadcast_model_update(f"NEW_MODEL:{filename}")
-#         return {
-#             "status": "success",
-#             "message": f"Aggregated weights saved as {filename}",
-#             "num_clients": len(weights_list)
-#         }
-#     except Exception as e:
-#         db.rollback()
-#         raise HTTPException(status_code=500, detail=str(e))
+import traceback
 
 @app.get("/aggregate-weights")
 async def aggregate_weights():
     db = next(get_db())
     try:
+        logging.info("Starting aggregation process.")
+        
         # Load last processed timestamp from the database
-        last_processed_timestamp = int(load_last_processed_timestamp(db))
-        global_vars['last_processed_timestamp'] = last_processed_timestamp or 0  # Use 0 if no timestamp is found
+        try:
+            last_processed_timestamp = int(load_last_processed_timestamp(db))
+        except Exception as e:
+            logging.error(f"Failed to load last processed timestamp: {e}")
+            last_processed_timestamp = 0  # Fallback to default
+        global_vars['last_processed_timestamp'] = last_processed_timestamp
 
-        model = get_model_architecture()
-        if not model:
-            raise HTTPException(status_code=500, detail="Failed to load model architecture")
-
-        weights_list, num_examples_list, loss_list, new_timestamp, contributing_client_ids = load_weights_from_blob(
-            blob_service_client_client, 
-            CLIENT_CONTAINER_NAME, 
-            model, 
-            global_vars['last_processed_timestamp']
-        )
-
+        # Load model architecture
+        try:
+            model = get_model_architecture()
+            if not model:
+                raise ValueError("Model architecture is None")
+        except Exception as e:
+            logging.error(f"Failed to load model architecture: {e}")
+            raise HTTPException(status_code=500, detail="Error loading model architecture")
+        
+        # Load weights from blob
+        try:
+            weights_list, num_examples_list, loss_list, new_timestamp, contributing_client_ids = load_weights_from_blob(
+                blob_service_client_client,
+                CLIENT_CONTAINER_NAME,
+                model,
+                global_vars['last_processed_timestamp']
+            )
+        except Exception as e:
+            logging.error(f"Error loading weights from blob: {traceback.format_exc()}")
+            raise HTTPException(status_code=500, detail="Error loading weights from blob")
+        
         if not weights_list:
+            logging.info("No new weights found.")
             return {"status": "no_update", "message": "No new weights found", "num_clients": 0}
         if len(weights_list) < 2:
+            logging.info("Insufficient weight files for aggregation.")
             return {"status": "no_update", "message": "Only 1 weight file found", "num_clients": 1}
         if not num_examples_list:
-            print("Example counts missing for aggregation")
-            logging.error("Example counts missing for aggregation")
-            return None
+            logging.error("Missing example counts for aggregation.")
+            raise HTTPException(status_code=500, detail="Example counts missing for aggregation")
 
-        # Synchronize latest version from the database
-        latest_model = db.query(GlobalModel).order_by(GlobalModel.version.desc()).first()
-        global_vars['latest_version'] = latest_model.version if latest_model else 0
+        logging.info(f"Contributing clients: {contributing_client_ids}")
 
-        # Increment version
-        global_vars['latest_version'] += 1
-        # Ensure no duplicate version
-        if db.query(GlobalModel).filter_by(version=global_vars['latest_version']).first():
-            raise HTTPException(status_code=409, detail=f"Model with version {global_vars['latest_version']} already exists")
+        # Increment and validate version
+        try:
+            latest_model = db.query(GlobalModel).order_by(GlobalModel.version.desc()).first()
+            global_vars['latest_version'] = (latest_model.version if latest_model else 0) + 1
+
+            if db.query(GlobalModel).filter_by(version=global_vars['latest_version']).first():
+                raise ValueError(f"Duplicate model version {global_vars['latest_version']}")
+        except Exception as e:
+            logging.error(f"Error validating model version: {e}")
+            raise HTTPException(status_code=500, detail="Error managing model versions")
 
         filename = get_versioned_filename(global_vars['latest_version'])
 
-        logging.info(f"Aggregating weights from {len(weights_list)} clients")
-        avg_weights = federated_weighted_averaging(weights_list, num_examples_list, loss_list)
-        logging.info(f"Aggregation completed.")
-        if not avg_weights or not save_weights_to_blob(avg_weights, filename, model):
-            raise HTTPException(status_code=500, detail="Failed to save aggregated weights")
+        # Aggregate weights
+        try:
+            logging.info(f"Aggregating weights from {len(weights_list)} clients.")
+            avg_weights = federated_weighted_averaging(weights_list, num_examples_list, loss_list)
+            if not avg_weights:
+                raise ValueError("Aggregated weights are None")
+        except Exception as e:
+            logging.error(f"Error during weight aggregation: {traceback.format_exc()}")
+            raise HTTPException(status_code=500, detail="Error during weight aggregation")
 
-        # Save the new timestamp to the database
-        save_last_processed_timestamp(db, new_timestamp)
+        # Save aggregated weights
+        try:
+            if not save_weights_to_blob(avg_weights, filename, model):
+                raise ValueError("Failed to save weights to blob")
+        except Exception as e:
+            logging.error(f"Error saving aggregated weights: {e}")
+            raise HTTPException(status_code=500, detail="Error saving aggregated weights")
 
-        # Only update contribution count for the contributing clients
-        db.query(Client).filter(Client.client_id.in_(contributing_client_ids)).update(
-            {"contribution_count": Client.contribution_count + 1},
-            synchronize_session=False  # To avoid unnecessary session flush
-        )
-        db.commit()
+        # Save the new timestamp
+        try:
+            save_last_processed_timestamp(db, new_timestamp)
+        except Exception as e:
+            logging.error(f"Error saving last processed timestamp: {e}")
+            raise HTTPException(status_code=500, detail="Error saving timestamp")
 
-        # Update the database with model and client information, saving only contributing client IDs
-        new_model = GlobalModel(
-            version=global_vars['latest_version'],
-            num_clients_contributed=len(contributing_client_ids),
-            client_ids=",".join(contributing_client_ids)  # Only contributing clients
-        )
-        db.add(new_model)
-        db.commit()
+        # Update client contribution counts
+        try:
+            db.query(Client).filter(Client.client_id.in_(contributing_client_ids)).update(
+                {"contribution_count": Client.contribution_count + 1},
+                synchronize_session=False
+            )
+            db.commit()
+        except Exception as e:
+            logging.error(f"Error updating client contributions: {e}")
+            db.rollback()
+            raise HTTPException(status_code=500, detail="Error updating client contributions")
 
-        await manager.broadcast_model_update(f"NEW_MODEL:{filename}")
+        # Update global model information
+        try:
+            new_model = GlobalModel(
+                version=global_vars['latest_version'],
+                num_clients_contributed=len(contributing_client_ids),
+                client_ids=",".join(contributing_client_ids)
+            )
+            db.add(new_model)
+            db.commit()
+        except Exception as e:
+            logging.error(f"Error saving global model information: {e}")
+            db.rollback()
+            raise HTTPException(status_code=500, detail="Error saving global model information")
+
+        # Notify clients of new model
+        try:
+            await manager.broadcast_model_update(f"NEW_MODEL:{filename}")
+        except Exception as e:
+            logging.error(f"Error broadcasting model update: {e}")
+
+        logging.info(f"Aggregation process completed successfully. Model saved as {filename}.")
         return {
             "status": "success",
             "message": f"Aggregated weights saved as {filename}",
             "num_clients": len(contributing_client_ids)
         }
+    except HTTPException as http_exc:
+        logging.error(f"HTTPException: {http_exc.detail}")
+        raise
     except Exception as e:
+        logging.error(f"Unexpected error: {traceback.format_exc()}")
         db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-
+        raise HTTPException(status_code=500, detail="Internal server error")
+    finally:
+        db.close()
 
 # @app.websocket("/ws/{client_id}") 
 # async def websocket_endpoint(websocket: WebSocket, client_id: str):
