@@ -83,8 +83,8 @@ class GlobalModel(Base):
     clients = relationship("Client", secondary=client_model_association, back_populates="models_contributed")
 
 # Example SQLAlchemy model for Global Variables
-class GlobalVars(Base):
-    __tablename__ = "global_vars"
+class GlobalAggregation(Base):
+    __tablename__ = "global_aggregation"
     
     id = Column(Integer, primary_key=True, index=True)
     key = Column(String, unique=True, index=True)
@@ -311,7 +311,7 @@ def load_last_aggregation_timestamp(db):
     retry_attempts = 3
     for attempt in range(retry_attempts):
         try:
-            timestamp = db.query(GlobalVars).filter_by(key="last_aggregation_timestamp").first()
+            timestamp = db.query(GlobalAggregation).filter_by(key="last_aggregation_timestamp").first()
             return timestamp.value if timestamp else None
         except OperationalError as db_error:
             logging.error(f"Attempt {attempt + 1} - Database error: {db_error}", exc_info=True)
@@ -322,12 +322,12 @@ def load_last_aggregation_timestamp(db):
 
 # Save the last processed timestamp to the database
 def save_last_aggregation_timestamp(db, new_timestamp):
-    timestamp_record = db.query(GlobalVars).filter_by(key="last_aggregation_timestamp").first()
+    timestamp_record = db.query(GlobalAggregation).filter_by(key="last_aggregation_timestamp").first()
     if timestamp_record:
         timestamp_record.value = new_timestamp
     else:
         # If the timestamp doesn't exist, insert a new record
-        new_record = GlobalVars(key="last_aggregation_timestamp", value=new_timestamp)
+        new_record = GlobalAggregation(key="last_aggregation_timestamp", value=new_timestamp)
         db.add(new_record)
     db.commit()
 
@@ -509,7 +509,7 @@ async def get_all_data(db: Session = Depends(get_db)):
         global_models = db.execute(select(GlobalModel)).scalars().all()
         
         # Query all data from the 'global_vars' table
-        global_vars_table = db.execute(select(GlobalVars)).scalars().all()
+        global_vars_table = db.execute(select(GlobalAggregation)).scalars().all()
 
         # Return all the data as a dictionary
         return {
