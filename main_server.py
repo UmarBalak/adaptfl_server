@@ -41,7 +41,8 @@ if not DATABASE_URL:
     raise ValueError("DATABASE_URL environment variable is missing")
 global_vars = {
     'last_processed_timestamp': 0,
-    'latest_version': 0
+    'latest_version': 0,
+    'last_checked_timestamp': 0
 }
 
 # SQLAlchemy setup
@@ -514,7 +515,8 @@ async def get_all_data(db: Session = Depends(get_db)):
         return {
             "clients": clients,
             "global_models": global_models,
-            "global_vars": global_vars
+            "global_vars": global_vars,
+            "last_checked_timestamp": global_vars['last_checked_timestamp']
         }
     except Exception as e:
         return {"error": str(e)}
@@ -555,6 +557,7 @@ async def register(
 async def aggregate_weights():
     db = next(get_db())
     try:
+        global_vars['last_checked_timestamp'] = int(datetime.now().strftime("%Y%m%d%H%M%S"))
         # Load last processed timestamp from the database
         last_processed_timestamp = int(load_last_processed_timestamp(db))
         global_vars['last_processed_timestamp'] = last_processed_timestamp or 0  # Use 0 if no timestamp is found
