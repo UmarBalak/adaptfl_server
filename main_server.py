@@ -499,7 +499,7 @@ async def health_check_monitor():
     """
     return Response(status_code=200)
 
-@app.get("/get_data/")
+@app.get("/get_data")
 async def get_all_data(db: Session = Depends(get_db)):
     try:
         # Query all data from the 'clients' table
