@@ -312,7 +312,7 @@ def load_last_aggregation_timestamp(db):
     for attempt in range(retry_attempts):
         try:
             timestamp = db.query(GlobalAggregation).filter_by(key="last_aggregation_timestamp").first()
-            return timestamp.value if timestamp else None
+            return timestamp.value if timestamp else 0
         except OperationalError as db_error:
             logging.error(f"Attempt {attempt + 1} - Database error: {db_error}", exc_info=True)
             if attempt < retry_attempts - 1:
@@ -767,7 +767,7 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
 # Scheduler setup
 scheduler = BackgroundScheduler()
 
-@scheduler.scheduled_job(CronTrigger(minute="*/15"))
+@scheduler.scheduled_job(CronTrigger(minute="*/2"))
 def scheduled_aggregate_weights():
     """
     Scheduled task to aggregate weights every minute.
@@ -780,7 +780,7 @@ def scheduled_aggregate_weights():
 
 scheduler.start()
 
-# if __name__ == "__main__":
-#     import uvicorn
-#     logging.info("Starting Server...")
-#     uvicorn.run(app, host="localhost", port=8000)
+if __name__ == "__main__":
+    import uvicorn
+    logging.info("Starting Server...")
+    uvicorn.run(app, host="localhost", port=8000)
