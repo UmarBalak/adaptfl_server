@@ -39,8 +39,8 @@ from datetime import datetime
 DATABASE_URL = os.getenv("DATABASE_URL")  # Format: postgresql://user:password@host:port/database
 if not DATABASE_URL:
     raise ValueError("DATABASE_URL environment variable is missing")
-global_vars = {
-    'last_processed_timestamp': 0,
+global_vars_runtime = {
+    'last_aggregation_timestamp': 0,
     'latest_version': 0,
     'last_checked_timestamp': 0
 }
@@ -243,7 +243,7 @@ def load_weights_from_blob(
     blob_service_client: BlobServiceClient,
     container_name: str,
     model,
-    last_processed_timestamp: int
+    last_aggregation_timestamp: int
 ) -> Optional[Tuple[List[np.ndarray], List[dict], int]]:
     try:
         # Compile regex pattern to match blob names
@@ -253,7 +253,7 @@ def load_weights_from_blob(
         weights_list = []
         num_examples_list = []
         loss_list = []
-        new_last_processed_timestamp = last_processed_timestamp
+        new_last_aggregation_timestamp = last_aggregation_timestamp
 
         blobs = list(container_client.list_blobs())
         
@@ -262,7 +262,7 @@ def load_weights_from_blob(
             if match:
                 timestamp_str = match.group(1)
                 timestamp_int = int(timestamp_str.replace("_", ""))
-                if timestamp_int > last_processed_timestamp:
+                if timestamp_int > last_aggregation_timestamp:
                     blob_client = container_client.get_blob_client(blob.name)
                     
                     # Download the blob and load weights
@@ -291,27 +291,27 @@ def load_weights_from_blob(
 
                     # Store weights and update timestamps
                     weights_list.append(weights)
-                    new_last_processed_timestamp = max(new_last_processed_timestamp, timestamp_int)
+                    new_last_aggregation_timestamp = max(new_last_aggregation_timestamp, timestamp_int)
 
         if not weights_list:
-            logging.info(f"No new weights found since {last_processed_timestamp}.")
-            return None, [], [], last_processed_timestamp
+            logging.info(f"No new weights found since {last_aggregation_timestamp}.")
+            return None, [], [], last_aggregation_timestamp
 
         logging.info(f"Loaded weights from {len(weights_list)} files.")
-        return weights_list, num_examples_list, loss_list, new_last_processed_timestamp
+        return weights_list, num_examples_list, loss_list, new_last_aggregation_timestamp
 
     except Exception as e:
         logging.error(f"Error loading weights: {e}")
         if 'temp_path' in locals() and os.path.exists(temp_path):
             os.unlink(temp_path)
-        return None, [], [], last_processed_timestamp
+        return None, [], [], last_aggregation_timestamp
 
 # Load the last processed timestamp from the database
-def load_last_processed_timestamp(db):
+def load_last_aggregation_timestamp(db):
     retry_attempts = 3
     for attempt in range(retry_attempts):
         try:
-            timestamp = db.query(GlobalVars).filter_by(key="last_processed_timestamp").first()
+            timestamp = db.query(GlobalVars).filter_by(key="last_aggregation_timestamp").first()
             return timestamp.value if timestamp else None
         except OperationalError as db_error:
             logging.error(f"Attempt {attempt + 1} - Database error: {db_error}", exc_info=True)
@@ -321,13 +321,13 @@ def load_last_processed_timestamp(db):
                 raise
 
 # Save the last processed timestamp to the database
-def save_last_processed_timestamp(db, new_timestamp):
-    timestamp_record = db.query(GlobalVars).filter_by(key="last_processed_timestamp").first()
+def save_last_aggregation_timestamp(db, new_timestamp):
+    timestamp_record = db.query(GlobalVars).filter_by(key="last_aggregation_timestamp").first()
     if timestamp_record:
         timestamp_record.value = new_timestamp
     else:
         # If the timestamp doesn't exist, insert a new record
-        new_record = GlobalVars(key="last_processed_timestamp", value=new_timestamp)
+        new_record = GlobalVars(key="last_aggregation_timestamp", value=new_timestamp)
         db.add(new_record)
     db.commit()
 
@@ -509,14 +509,14 @@ async def get_all_data(db: Session = Depends(get_db)):
         global_models = db.execute(select(GlobalModel)).scalars().all()
         
         # Query all data from the 'global_vars' table
-        global_vars = db.execute(select(GlobalVars)).scalars().all()
+        global_vars_table = db.execute(select(GlobalVars)).scalars().all()
 
         # Return all the data as a dictionary
         return {
             "clients": clients,
             "global_models": global_models,
-            "global_vars": global_vars,
-            "last_checked_timestamp": global_vars['last_checked_timestamp']
+            "global_aggregation": global_vars_table,
+            "last_checked_timestamp": global_vars_runtime['last_checked_timestamp']
         }
     except Exception as e:
         return {"error": str(e)}
@@ -557,11 +557,11 @@ async def register(
 async def aggregate_weights():
     db = next(get_db())
     try:
-        global_vars['last_checked_timestamp'] = int(datetime.now().strftime("%Y%m%d%H%M%S"))
+        global_vars_runtime['last_checked_timestamp'] = int(datetime.now().strftime("%Y%m%d%H%M%S"))
         # Load last processed timestamp from the database
-        last_processed_timestamp = int(load_last_processed_timestamp(db))
-        global_vars['last_processed_timestamp'] = last_processed_timestamp or 0  # Use 0 if no timestamp is found
-        logging.info(f"Loaded last processed timestamp: {global_vars['last_processed_timestamp']}")
+        last_aggregation_timestamp = int(load_last_aggregation_timestamp(db))
+        global_vars_runtime['last_aggregation_timestamp'] = last_aggregation_timestamp or 0  # Use 0 if no timestamp is found
+        logging.info(f"Loaded last processed timestamp: {global_vars_runtime['last_aggregation_timestamp']}")
 
         model = get_model_architecture()
         if not model:
@@ -572,7 +572,7 @@ async def aggregate_weights():
             blob_service_client_client, 
             CLIENT_CONTAINER_NAME, 
             model, 
-            global_vars['last_processed_timestamp']
+            global_vars_runtime['last_aggregation_timestamp']
         )
 
         if not weights_list:
@@ -587,16 +587,16 @@ async def aggregate_weights():
 
         # Synchronize latest version from the database
         latest_model = db.query(GlobalModel).order_by(GlobalModel.version.desc()).first()
-        global_vars['latest_version'] = latest_model.version if latest_model else 0
-        logging.info(f"Latest model version loaded: {global_vars['latest_version']}")
+        global_vars_runtime['latest_version'] = latest_model.version if latest_model else 0
+        logging.info(f"Latest model version loaded: {global_vars_runtime['latest_version']}")
 
         # Increment version
-        global_vars['latest_version'] += 1
-        if db.query(GlobalModel).filter_by(version=global_vars['latest_version']).first():
-            logging.error(f"Duplicate model version detected: {global_vars['latest_version']}")
-            raise HTTPException(status_code=409, detail=f"Model with version {global_vars['latest_version']} already exists")
+        global_vars_runtime['latest_version'] += 1
+        if db.query(GlobalModel).filter_by(version=global_vars_runtime['latest_version']).first():
+            logging.error(f"Duplicate model version detected: {global_vars_runtime['latest_version']}")
+            raise HTTPException(status_code=409, detail=f"Model with version {global_vars_runtime['latest_version']} already exists")
 
-        filename = get_versioned_filename(global_vars['latest_version'])
+        filename = get_versioned_filename(global_vars_runtime['latest_version'])
         logging.info(f"Preparing to save aggregated weights as: {filename}")
 
         logging.info(f"Aggregating weights from {len(weights_list)} clients")
@@ -608,13 +608,13 @@ async def aggregate_weights():
             raise HTTPException(status_code=500, detail="Failed to save aggregated weights")
 
         # Save the new timestamp to the database
-        save_last_processed_timestamp(db, new_timestamp)
+        save_last_aggregation_timestamp(db, new_timestamp)
         logging.info(f"New timestamp saved to the database: {new_timestamp}")
 
         # Update the database with model and client information
         client_ids = [c.client_id for c in db.query(Client).all()]
         new_model = GlobalModel(
-            version=global_vars['latest_version'],
+            version=global_vars_runtime['latest_version'],
             num_clients_contributed=len(weights_list),
             client_ids=",".join(client_ids)
         )
@@ -626,7 +626,7 @@ async def aggregate_weights():
             synchronize_session=False
         )
         db.commit()
-        logging.info(f"Model version {global_vars['latest_version']} saved and database updated")
+        logging.info(f"Model version {global_vars_runtime['latest_version']} saved and database updated")
 
         # Notify clients of new model
         await manager.broadcast_model_update(f"NEW_MODEL:{filename}")
@@ -687,8 +687,8 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
 
         # Get the latest model version and send to the client
         latest_model = db.query(GlobalModel).order_by(GlobalModel.version.desc()).first()
-        global_vars['latest_version'] = latest_model.version if latest_model else 0
-        latest_model_version = f"g{global_vars['latest_version']}.keras"
+        global_vars_runtime['latest_version'] = latest_model.version if latest_model else 0
+        latest_model_version = f"g{global_vars_runtime['latest_version']}.keras"
         await websocket.send_text(f"LATEST_MODEL:{latest_model_version}")
 
         while True:
@@ -780,7 +780,7 @@ def scheduled_aggregate_weights():
 
 scheduler.start()
 
-# if __name__ == "__main__":
-#     import uvicorn
-#     logging.info("Starting Server...")
-#     uvicorn.run(app, host="localhost", port=8000)
+if __name__ == "__main__":
+    import uvicorn
+    logging.info("Starting Server...")
+    uvicorn.run(app, host="localhost", port=8000)
