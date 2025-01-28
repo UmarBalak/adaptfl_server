@@ -767,7 +767,7 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
 # Scheduler setup
 scheduler = BackgroundScheduler()
 
-@scheduler.scheduled_job(CronTrigger(minute="*/2"))
+@scheduler.scheduled_job(CronTrigger(minute="*/15"))
 def scheduled_aggregate_weights():
     """
     Scheduled task to aggregate weights every minute.
@@ -780,7 +780,7 @@ def scheduled_aggregate_weights():
 
 scheduler.start()
 
-if __name__ == "__main__":
-    import uvicorn
-    logging.info("Starting Server...")
-    uvicorn.run(app, host="localhost", port=8000)
+# if __name__ == "__main__":
+#     import uvicorn
+#     logging.info("Starting Server...")
+#     uvicorn.run(app, host="localhost", port=8000)
