@@ -3,7 +3,7 @@ import logging
 import numpy as np
 import time
 from typing import List, Optional, Dict
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, Response
 from azure.storage.blob import BlobServiceClient, BlobClient
 from tensorflow import keras
 from datetime import datetime
@@ -481,12 +481,12 @@ async def health_check():
     """
     return {"status": "healthy"}
 
-@app.head("/health", response_class=JSONResponse)
+@app.head("/health")
 async def health_check_monitor():
     """
     Health check endpoint to verify service availability.
     """
-    return {"status": "healthy"}
+    return Response(status_code=200)
 
 @app.get("/get_data/")
 async def get_all_data(db: Session = Depends(get_db)):
@@ -754,7 +754,7 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
 # Scheduler setup
 scheduler = BackgroundScheduler()
 
-@scheduler.scheduled_job(CronTrigger(minute="*/5"))
+@scheduler.scheduled_job(CronTrigger(minute="*/15"))
 def scheduled_aggregate_weights():
     """
     Scheduled task to aggregate weights every minute.
