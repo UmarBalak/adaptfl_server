@@ -20,6 +20,7 @@ import logging
 import os
 import re
 import tempfile
+from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional, Tuple
 import numpy as np
 from azure.storage.blob import BlobServiceClient
@@ -469,6 +470,15 @@ def verify_admin(api_key: str):
 # Initialize FastAPI app with connection manager
 manager = ConnectionManager()
 app = FastAPI()
+
+# Configure CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Replace with your frontend URL in production
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
+)
 
 @app.get("/")
 async def root():
