@@ -557,7 +557,7 @@ async def register(
 async def aggregate_weights():
     db = next(get_db())
     try:
-        global_vars_runtime['last_checked_timestamp'] = int(datetime.now().strftime("%Y%m%d%H%M%S"))
+        global_vars_runtime['last_checked_timestamp'] = datetime.now().strftime("%Y%m%d%H%M%S")
         # Load last processed timestamp from the database
         last_aggregation_timestamp = int(load_last_aggregation_timestamp(db))
         global_vars_runtime['last_aggregation_timestamp'] = last_aggregation_timestamp or 0  # Use 0 if no timestamp is found
