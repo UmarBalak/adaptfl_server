@@ -311,25 +311,44 @@ def load_last_aggregation_timestamp(db):
     retry_attempts = 3
     for attempt in range(retry_attempts):
         try:
+            # Attempt to query the database
             timestamp = db.query(GlobalAggregation).filter_by(key="last_aggregation_timestamp").first()
             return timestamp.value if timestamp else 0
         except OperationalError as db_error:
             logging.error(f"Attempt {attempt + 1} - Database error: {db_error}", exc_info=True)
+            db.rollback()  # Rollback any pending transaction
             if attempt < retry_attempts - 1:
                 time.sleep(2)  # Wait before retrying
             else:
                 raise
+        finally:
+            db.close()  # Ensure the session is closed
+
 
 # Save the last processed timestamp to the database
 def save_last_aggregation_timestamp(db, new_timestamp):
-    timestamp_record = db.query(GlobalAggregation).filter_by(key="last_aggregation_timestamp").first()
-    if timestamp_record:
-        timestamp_record.value = new_timestamp
-    else:
-        # If the timestamp doesn't exist, insert a new record
-        new_record = GlobalAggregation(key="last_aggregation_timestamp", value=new_timestamp)
-        db.add(new_record)
-    db.commit()
+    try:
+        # Fetch the existing timestamp record
+        timestamp_record = db.query(GlobalAggregation).filter_by(key="last_aggregation_timestamp").first()
+        if timestamp_record:
+            # Update the existing record
+            timestamp_record.value = new_timestamp
+        else:
+            # If the timestamp doesn't exist, insert a new record
+            new_record = GlobalAggregation(key="last_aggregation_timestamp", value=new_timestamp)
+            db.add(new_record)
+        
+        # Commit the changes
+        db.commit()
+    except Exception as e:
+        # Rollback in case of any error
+        db.rollback()
+        logging.error(f"Error saving last aggregation timestamp: {e}", exc_info=True)
+        raise
+    finally:
+        # Ensure the session is closed
+        db.close()
+
 
 
 def save_weights_to_blob(weights: List[np.ndarray], filename: str, model) -> bool:
@@ -504,10 +523,10 @@ async def get_all_data(db: Session = Depends(get_db)):
     try:
         # Query all data from the 'clients' table
         clients = db.execute(select(Client)).scalars().all()
-        
+
         # Query all data from the 'global_models' table
         global_models = db.execute(select(GlobalModel)).scalars().all()
-        
+
         # Query all data from the 'global_vars' table
         global_vars_table = db.execute(select(GlobalAggregation)).scalars().all()
 
@@ -519,39 +538,63 @@ async def get_all_data(db: Session = Depends(get_db)):
             "last_checked_timestamp": global_vars_runtime['last_checked_timestamp']
         }
     except Exception as e:
-        return {"error": str(e)}
+        logging.error(f"Error in /get_data endpoint: {e}", exc_info=True)
+        return {"error": "Failed to fetch data. Please try again later."}
+    finally:
+        try:
+            db.close()  # Ensure the database session is closed
+        except Exception as close_error:
+            logging.error(f"Error closing the database session: {close_error}", exc_info=True)
 
 
 # Modified registration endpoint
 @app.post("/register")
 async def register(
-    csn: str = Body(...),
-    admin_api_key: str = Body(...),
+    csn: str = Body(..., embed=True),
+    admin_api_key: str = Body(..., embed=True),
     db: Session = Depends(get_db)
 ):
-    verify_admin(admin_api_key)
-    
-    existing_client = db.query(Client).filter(Client.csn == csn).first()
-    if existing_client:
-        raise HTTPException(status_code=400, detail="Client already registered")
-    
-    client_id = str(uuid.uuid4())
-    api_key = str(uuid.uuid4())
-    
-    new_client = Client(
-        csn=csn,
-        client_id=client_id,
-        api_key=api_key
-    )
-    
-    db.add(new_client)
-    db.commit()
-    
-    return {
-        "status": "success",
-        "message": "Client registered successfully",
-        "data": {"client_id": client_id, "api_key": api_key}
-    }
+    try:
+        # Verify admin API key
+        verify_admin(admin_api_key)
+        
+        # Check if the client is already registered
+        existing_client = db.query(Client).filter(Client.csn == csn).first()
+        if existing_client:
+            raise HTTPException(status_code=400, detail="Client already registered")
+        
+        # Generate unique client ID and API key
+        client_id = str(uuid.uuid4())
+        api_key = str(uuid.uuid4())
+        
+        # Create a new client record
+        new_client = Client(
+            csn=csn,
+            client_id=client_id,
+            api_key=api_key
+        )
+        db.add(new_client)
+        db.commit()
+        
+        # Return success response
+        return {
+            "status": "success",
+            "message": "Client registered successfully",
+            "data": {"client_id": client_id, "api_key": api_key}
+        }
+    except HTTPException as http_exc:
+        raise http_exc  # Re-raise HTTP exceptions to be handled by FastAPI
+    except Exception as e:
+        # Log unexpected errors and return a generic error response
+        logging.error(f"Error during client registration: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500, detail="An error occurred while processing the registration"
+        )
+    finally:
+        try:
+            db.close()  # Ensure the database session is closed
+        except Exception as close_error:
+            logging.error(f"Error closing the database session: {close_error}", exc_info=True)
 
 @app.get("/aggregate-weights")
 async def aggregate_weights():
