@@ -2,7 +2,7 @@ import os
 import logging
 import numpy as np
 import time
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Tuple
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, Response
 from azure.storage.blob import BlobServiceClient, BlobClient
 from tensorflow import keras
@@ -30,9 +30,8 @@ load_dotenv(dotenv_path='.env')
 
 import os
 from sqlalchemy import create_engine, Column, String, DateTime, Table, Integer, ForeignKey, select
-from sqlalchemy.exc import SQLAlchemyError, OperationalError
+from sqlalchemy.exc import SQLAlchemyError, OperationalError, DisconnectionError
 from sqlalchemy.orm import sessionmaker, Session, relationship, declarative_base
-from sqlalchemy.exc import SQLAlchemyError
 from datetime import datetime
 
 # Database configuration
@@ -46,7 +45,13 @@ global_vars_runtime = {
 }
 
 # SQLAlchemy setup
-engine = create_engine(DATABASE_URL)
+engine = create_engine(
+    DATABASE_URL,
+    # pool_size=5,  # Maintain a pool of connections
+    # max_overflow=10,  # Allow extra connections when needed
+    # pool_recycle=600,  # Recycle connections every 30 min to prevent timeout
+    pool_pre_ping=True,  # Ping connections before using them
+)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
@@ -103,9 +108,10 @@ def get_db():
     db = SessionLocal()
     try:
         yield db
-        db.commit()  # Commit changes before closing
-    except Exception:
-        db.rollback()  # Rollback on error
+    except Exception as e:
+        logging.error(f"Database error: {str(e)}")
+        db.rollback()
+        raise  # Re-raise the exception after rollback
     finally:
         db.close()
 
@@ -119,36 +125,6 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-
-# class ConnectionManager:
-#     def __init__(self):
-#         self.active_connections: Dict[str, WebSocket] = {}
-
-#     async def connect(self, client_id: str, websocket: WebSocket):
-
-#         await websocket.accept()
-#         self.active_connections[client_id] = websocket
-
-#         logging.info(f"Client {client_id} connected. Total connections: {len(self.active_connections)}")
-
-#     async def disconnect(self, client_id: str):
-#         if client_id in self.active_connections:
-#             del self.active_connections[client_id]
-#             logging.info(f"Client {client_id} disconnected. Total connections: {len(self.active_connections)}")
-
-#     async def broadcast_model_update(self, message: str):
-#         disconnected_clients = []
-#         for client_id, connection in self.active_connections.items():
-#             try:
-#                 await connection.send_text(message)
-#                 logging.info(f"Update notification sent to client {client_id}")
-#             except Exception as e:
-#                 logging.error(f"Failed to send update to client {client_id}: {e}")
-#                 disconnected_clients.append(client_id)
-        
-#         # Clean up disconnected clients
-#         for client_id in disconnected_clients:
-#             await self.disconnect(client_id)
 
 class ConnectionManager:
     def __init__(self):
@@ -244,10 +220,19 @@ def load_weights_from_blob(
     container_name: str,
     model,
     last_aggregation_timestamp: int
-) -> Optional[Tuple[List[np.ndarray], List[dict], int]]:
+) -> Optional[Tuple[List[Tuple[str, np.ndarray]], List[int], List[float], int]]:
+    """
+    Loads new weights from the Azure Blob Storage and extracts client IDs.
+
+    Returns:
+        - List of tuples (client_id, weights)
+        - List of num_examples
+        - List of loss values
+        - Updated last_aggregation_timestamp
+    """
     try:
-        # Compile regex pattern to match blob names
-        pattern = re.compile(r"client[0-9a-fA-F\-]+_v\d+_(\d{8}_\d{6})\.keras")
+        # Regex pattern to extract client_id and timestamp
+        pattern = re.compile(r"client([0-9a-fA-F\-]+)_v\d+_(\d{8}_\d{6})\.keras")
         container_client = blob_service_client.get_container_client(container_name)
 
         weights_list = []
@@ -256,29 +241,30 @@ def load_weights_from_blob(
         new_last_aggregation_timestamp = last_aggregation_timestamp
 
         blobs = list(container_client.list_blobs())
-        
+
         for blob in blobs:
             match = pattern.match(blob.name)
             if match:
-                timestamp_str = match.group(1)
+                client_id = match.group(1)  # Extract client ID
+                timestamp_str = match.group(2)
                 timestamp_int = int(timestamp_str.replace("_", ""))
+
                 if timestamp_int > last_aggregation_timestamp:
                     blob_client = container_client.get_blob_client(blob.name)
-                    
+
                     # Download the blob and load weights
                     with tempfile.NamedTemporaryFile(suffix='.keras', delete=False) as temp_file:
                         download_stream = blob_client.download_blob()
                         temp_file.write(download_stream.readall())
                         temp_path = temp_file.name
-                    
+
                     # Load weights into the model
                     model.load_weights(temp_path)
                     weights = model.get_weights()
-                    
+
                     # Fetch metadata from the blob
                     blob_metadata = blob_client.get_blob_properties().metadata
                     if blob_metadata:
-                        # Convert metadata values to appropriate types if necessary
                         num_examples = int(blob_metadata.get('num_examples', 0))
                         loss = float(blob_metadata.get('loss', 0.0))
                         if num_examples == 0:
@@ -289,8 +275,8 @@ def load_weights_from_blob(
                     # Clean up temporary file
                     os.unlink(temp_path)
 
-                    # Store weights and update timestamps
-                    weights_list.append(weights)
+                    # Store (client_id, weights)
+                    weights_list.append((client_id, weights))
                     new_last_aggregation_timestamp = max(new_last_aggregation_timestamp, timestamp_int)
 
         if not weights_list:
@@ -305,15 +291,15 @@ def load_weights_from_blob(
         if 'temp_path' in locals() and os.path.exists(temp_path):
             os.unlink(temp_path)
         return None, [], [], last_aggregation_timestamp
-
+    
 # Load the last processed timestamp from the database
-def load_last_aggregation_timestamp(db):
+def load_last_aggregation_timestamp(db: Session) -> int:
     retry_attempts = 3
     for attempt in range(retry_attempts):
         try:
             # Attempt to query the database
             timestamp = db.query(GlobalAggregation).filter_by(key="last_aggregation_timestamp").first()
-            return timestamp.value if timestamp else 0
+            return int(timestamp.value) if timestamp else 0
         except OperationalError as db_error:
             logging.error(f"Attempt {attempt + 1} - Database error: {db_error}", exc_info=True)
             db.rollback()  # Rollback any pending transaction
@@ -321,34 +307,25 @@ def load_last_aggregation_timestamp(db):
                 time.sleep(2)  # Wait before retrying
             else:
                 raise
-        finally:
-            db.close()  # Ensure the session is closed
-
 
 # Save the last processed timestamp to the database
-def save_last_aggregation_timestamp(db, new_timestamp):
+def save_last_aggregation_timestamp(db: Session, new_timestamp):
     try:
         # Fetch the existing timestamp record
         timestamp_record = db.query(GlobalAggregation).filter_by(key="last_aggregation_timestamp").first()
+        
         if timestamp_record:
             # Update the existing record
             timestamp_record.value = new_timestamp
         else:
-            # If the timestamp doesn't exist, insert a new record
+            # Insert a new record if not found
             new_record = GlobalAggregation(key="last_aggregation_timestamp", value=new_timestamp)
             db.add(new_record)
         
-        # Commit the changes
-        db.commit()
+        db.commit()  # Commit changes
     except Exception as e:
-        # Rollback in case of any error
-        db.rollback()
         logging.error(f"Error saving last aggregation timestamp: {e}", exc_info=True)
-        raise
-    finally:
-        # Ensure the session is closed
-        db.close()
-
+        raise  # Re-raise exception for handling at a higher level
 
 
 def save_weights_to_blob(weights: List[np.ndarray], filename: str, model) -> bool:
@@ -378,6 +355,103 @@ def save_weights_to_blob(weights: List[np.ndarray], filename: str, model) -> boo
     finally:
         if temp_path and os.path.exists(temp_path):
             os.unlink(temp_path)
+
+async def aggregate_weights_core(db: Session):
+    try:
+        global_vars_runtime['last_checked_timestamp'] = datetime.now().strftime("%Y%m%d%H%M%S")
+        # Load last processed timestamp from the database
+        last_aggregation_timestamp = load_last_aggregation_timestamp(db)
+        global_vars_runtime['last_aggregation_timestamp'] = last_aggregation_timestamp or 0
+        logging.info(f"Loaded last processed timestamp: {global_vars_runtime['last_aggregation_timestamp']}")
+
+        model = get_model_architecture()
+        if not model:
+            logging.critical("Failed to load model architecture")
+            raise HTTPException(status_code=500, detail="Failed to load model architecture")
+
+        weights_list_with_ids, num_examples_list, loss_list, new_timestamp = load_weights_from_blob(
+            blob_service_client_client, 
+            CLIENT_CONTAINER_NAME, 
+            model, 
+            global_vars_runtime['last_aggregation_timestamp']
+        )
+
+        if not weights_list_with_ids:
+            logging.info("No new weights found in the blob")
+            return {"status": "no_update", "message": "No new weights found", "num_clients": 0}
+        if len(weights_list_with_ids) < 2:
+            logging.info("Insufficient weights for aggregation (only 1 weight file found)")
+            return {"status": "no_update", "message": "Only 1 weight file found", "num_clients": 1}
+        if not num_examples_list:
+            logging.error("Example counts are missing, cannot perform aggregation")
+            return {"status": "error", "message": "Example counts missing for aggregation"}
+
+        # Synchronize latest version from the database
+        latest_model = db.query(GlobalModel).order_by(GlobalModel.version.desc()).first()
+        global_vars_runtime['latest_version'] = latest_model.version if latest_model else 0
+        logging.info(f"Latest model version loaded: {global_vars_runtime['latest_version']}")
+
+        # Increment version
+        global_vars_runtime['latest_version'] += 1
+        if db.query(GlobalModel).filter_by(version=global_vars_runtime['latest_version']).first():
+            logging.error(f"Duplicate model version detected: {global_vars_runtime['latest_version']}")
+            raise HTTPException(status_code=409, detail=f"Model with version {global_vars_runtime['latest_version']} already exists")
+
+        filename = get_versioned_filename(global_vars_runtime['latest_version'])
+        logging.info(f"Preparing to save aggregated weights as: {filename}")
+
+        weights_list = [weights for _, weights in weights_list_with_ids]
+
+        logging.info(f"Aggregating weights from {len(weights_list)} clients")
+        avg_weights = federated_weighted_averaging(weights_list, num_examples_list, loss_list)
+        logging.info("Aggregation completed successfully.")
+
+        if not avg_weights or not save_weights_to_blob(avg_weights, filename, model):
+            logging.critical("Failed to save aggregated weights to blob")
+            raise HTTPException(status_code=500, detail="Failed to save aggregated weights")
+
+        # Save the new timestamp to the database
+        save_last_aggregation_timestamp(db, new_timestamp)  # Make sure to pass db here
+        logging.info(f"New timestamp saved to the database: {new_timestamp}")
+
+        # Update the database with model and client information
+        contributing_client_ids = [id for id, _ in weights_list_with_ids]
+        new_model = GlobalModel(
+            version=global_vars_runtime['latest_version'],
+            num_clients_contributed=len(weights_list),
+            client_ids=",".join(contributing_client_ids)
+        )
+        db.add(new_model)
+
+        db.query(Client).filter(Client.client_id.in_(contributing_client_ids)).update(
+            {"contribution_count": Client.contribution_count + 1},
+            synchronize_session=False
+        )
+        db.commit()
+        logging.info(f"Model version {global_vars_runtime['latest_version']} saved and database updated")
+
+        # Notify clients of new model
+        await manager.broadcast_model_update(f"NEW_MODEL:{filename}")
+        logging.info(f"Clients notified of new model: {filename}")
+
+        return {
+            "status": "success",
+            "message": f"Aggregated weights saved as {filename}",
+            "num_clients": len(weights_list)
+        }
+    except SQLAlchemyError as db_error:
+        logging.error(f"Database error during aggregation: {db_error}", exc_info=True)
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Database error occurred") from db_error
+    except HTTPException as http_exc:
+        logging.error(f"HTTP Exception: {http_exc.detail}")
+        db.rollback()
+        raise
+    except Exception as e:
+        logging.exception("Unexpected error during aggregation")
+        db.rollback()
+        raise HTTPException(status_code=500, detail="An unexpected error occurred") from e
+
 
 def federated_weighted_averaging(weights_list, num_examples_list, loss_list, alpha=0.7):
     """Perform Weighted Federated Averaging with improved loss weighting."""
@@ -540,12 +614,6 @@ async def get_all_data(db: Session = Depends(get_db)):
     except Exception as e:
         logging.error(f"Error in /get_data endpoint: {e}", exc_info=True)
         return {"error": "Failed to fetch data. Please try again later."}
-    finally:
-        try:
-            db.close()  # Ensure the database session is closed
-        except Exception as close_error:
-            logging.error(f"Error closing the database session: {close_error}", exc_info=True)
-
 
 # Modified registration endpoint
 @app.post("/register")
@@ -590,115 +658,16 @@ async def register(
         raise HTTPException(
             status_code=500, detail="An error occurred while processing the registration"
         )
-    finally:
-        try:
-            db.close()  # Ensure the database session is closed
-        except Exception as close_error:
-            logging.error(f"Error closing the database session: {close_error}", exc_info=True)
 
 @app.get("/aggregate-weights")
-async def aggregate_weights():
-    db = next(get_db())
+async def aggregate_weights(db: Session = Depends(get_db)):
     try:
-        global_vars_runtime['last_checked_timestamp'] = datetime.now().strftime("%Y%m%d%H%M%S")
-        # Load last processed timestamp from the database
-        last_aggregation_timestamp = int(load_last_aggregation_timestamp(db))
-        global_vars_runtime['last_aggregation_timestamp'] = last_aggregation_timestamp or 0  # Use 0 if no timestamp is found
-        logging.info(f"Loaded last processed timestamp: {global_vars_runtime['last_aggregation_timestamp']}")
-
-        model = get_model_architecture()
-        if not model:
-            logging.critical("Failed to load model architecture")
-            raise HTTPException(status_code=500, detail="Failed to load model architecture")
-
-        weights_list, num_examples_list, loss_list, new_timestamp = load_weights_from_blob(
-            blob_service_client_client, 
-            CLIENT_CONTAINER_NAME, 
-            model, 
-            global_vars_runtime['last_aggregation_timestamp']
-        )
-
-        if not weights_list:
-            logging.info("No new weights found in the blob")
-            return {"status": "no_update", "message": "No new weights found", "num_clients": 0}
-        if len(weights_list) < 2:
-            logging.info("Insufficient weights for aggregation (only 1 weight file found)")
-            return {"status": "no_update", "message": "Only 1 weight file found", "num_clients": 1}
-        if not num_examples_list:
-            logging.error("Example counts are missing, cannot perform aggregation")
-            return {"status": "error", "message": "Example counts missing for aggregation"}
-
-        # Synchronize latest version from the database
-        latest_model = db.query(GlobalModel).order_by(GlobalModel.version.desc()).first()
-        global_vars_runtime['latest_version'] = latest_model.version if latest_model else 0
-        logging.info(f"Latest model version loaded: {global_vars_runtime['latest_version']}")
-
-        # Increment version
-        global_vars_runtime['latest_version'] += 1
-        if db.query(GlobalModel).filter_by(version=global_vars_runtime['latest_version']).first():
-            logging.error(f"Duplicate model version detected: {global_vars_runtime['latest_version']}")
-            raise HTTPException(status_code=409, detail=f"Model with version {global_vars_runtime['latest_version']} already exists")
-
-        filename = get_versioned_filename(global_vars_runtime['latest_version'])
-        logging.info(f"Preparing to save aggregated weights as: {filename}")
-
-        logging.info(f"Aggregating weights from {len(weights_list)} clients")
-        avg_weights = federated_weighted_averaging(weights_list, num_examples_list, loss_list)
-        logging.info("Aggregation completed successfully.")
-
-        if not avg_weights or not save_weights_to_blob(avg_weights, filename, model):
-            logging.critical("Failed to save aggregated weights to blob")
-            raise HTTPException(status_code=500, detail="Failed to save aggregated weights")
-
-        # Save the new timestamp to the database
-        save_last_aggregation_timestamp(db, new_timestamp)
-        logging.info(f"New timestamp saved to the database: {new_timestamp}")
-
-        # Update the database with model and client information
-        client_ids = [c.client_id for c in db.query(Client).all()]
-        new_model = GlobalModel(
-            version=global_vars_runtime['latest_version'],
-            num_clients_contributed=len(weights_list),
-            client_ids=",".join(client_ids)
-        )
-        db.add(new_model)
-
-        contributing_client_ids = [client.client_id for client in db.query(Client).filter(Client.client_id.in_(client_ids)).all()]
-        db.query(Client).filter(Client.client_id.in_(contributing_client_ids)).update(
-            {"contribution_count": Client.contribution_count + 1},
-            synchronize_session=False
-        )
-        db.commit()
-        logging.info(f"Model version {global_vars_runtime['latest_version']} saved and database updated")
-
-        # Notify clients of new model
-        await manager.broadcast_model_update(f"NEW_MODEL:{filename}")
-        logging.info(f"Clients notified of new model: {filename}")
-
-        return {
-            "status": "success",
-            "message": f"Aggregated weights saved as {filename}",
-            "num_clients": len(weights_list)
-        }
-    except SQLAlchemyError as db_error:
-        logging.error(f"Database error during aggregation: {db_error}", exc_info=True)
-        db.rollback()
-        raise HTTPException(status_code=500, detail="Database error occurred") from db_error
-    except HTTPException as http_exc:
-        logging.error(f"HTTP Exception: {http_exc.detail}")
-        db.rollback()
-        raise
+        return await aggregate_weights_core(db)
     except Exception as e:
-        logging.exception("Unexpected error during aggregation")
-        db.rollback()
-        raise HTTPException(status_code=500, detail="An unexpected error occurred") from e
-    finally:
-        db.close()
-
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.websocket("/ws/{client_id}")
-async def websocket_endpoint(websocket: WebSocket, client_id: str):
-    db = SessionLocal()  # Direct session creation
+async def websocket_endpoint(websocket: WebSocket, client_id: str, db: Session = Depends(get_db)):
     retry_attempts = 3
     try:
         # Check if the client exists in the database
@@ -719,9 +688,10 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
                 logging.info(f"Client {client_id} connected successfully, status updated to 'Active'.")
                 break
             except SQLAlchemyError as db_error:
+                db.rollback()  # Added explicit rollback
                 logging.error(f"Attempt {attempt + 1} - Failed to update 'Active' status for {client_id}: {db_error}")
                 if attempt < retry_attempts - 1:
-                    time.sleep(2)
+                    await asyncio.sleep(2)  # Changed to asyncio.sleep for async context
                 else:
                     raise
 
@@ -744,22 +714,24 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
                 # Update and notify client if status changes
                 for attempt in range(retry_attempts):
                     try:
-                        updated_client = db.query(Client).filter(Client.client_id == client_id).first()
-                        if updated_client and updated_client.status != client.status:
-                            client.status = updated_client.status
+                        # Refresh the session to avoid stale data
+                        db.refresh(client)
+                        if client.status != "Active":
+                            client.status = "Active"
                             db.commit()
                             await websocket.send_text(f"Your updated status is: {client.status}")
                         break
                     except SQLAlchemyError as db_error:
+                        db.rollback()  # Added explicit rollback
                         logging.error(f"Attempt {attempt + 1} - Database error for client {client_id}: {db_error}")
                         if attempt < retry_attempts - 1:
-                            time.sleep(2)
+                            await asyncio.sleep(2)
                         else:
                             raise
 
             except WebSocketDisconnect:
                 logging.info(f"Client {client_id} disconnected gracefully.")
-                break  # Exit loop on disconnect
+                break
             except Exception as e:
                 logging.error(f"Error handling message from client {client_id}: {e}")
                 await websocket.send_text("An error occurred. Please try again later.")
@@ -767,6 +739,7 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
 
     except SQLAlchemyError as db_error:
         logging.error(f"Database error for client {client_id}: {db_error}", exc_info=True)
+        db.rollback()  # Added explicit rollback
         await websocket.close(code=1002, reason="Database error.")
     except WebSocketDisconnect:
         logging.info(f"Client {client_id} disconnected unexpectedly.")
@@ -782,29 +755,29 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
             except Exception as e:
                 logging.error(f"Attempt {attempt + 1} - Failed to disconnect client {client_id}: {e}")
                 if attempt < retry_attempts - 1:
-                    time.sleep(2)
+                    await asyncio.sleep(2)
 
         for attempt in range(retry_attempts):
             try:
-                client = db.query(Client).filter(Client.client_id == client_id).first()
-                if client:
-                    client.status = "Inactive"
-                    db.commit()
-                    logging.info(f"Client {client_id} is now inactive. DB updated successfully.")
+                # Refresh the client object to avoid stale data
+                db.refresh(client)
+                client.status = "Inactive"
+                db.commit()
+                logging.info(f"Client {client_id} is now inactive. DB updated successfully.")
                 break
             except SQLAlchemyError as db_error:
+                db.rollback()  # Added explicit rollback
                 logging.error(f"Attempt {attempt + 1} - Failed to update 'Inactive' status for {client_id}: {db_error}")
                 if attempt < retry_attempts - 1:
-                    time.sleep(2)
+                    await asyncio.sleep(2)
                 else:
                     raise
             except Exception as e:
                 logging.error(f"Attempt {attempt + 1} - Unexpected error during cleanup for {client_id}: {e}")
                 if attempt < retry_attempts - 1:
-                    time.sleep(2)
+                    await asyncio.sleep(2)
 
-        db.close()  # Ensure database session is always closed
-        logging.info(f"Database session closed for client {client_id}.")
+        logging.info(f"Cleanup completed for client {client_id}.")
 
 
 # Scheduler setup
@@ -816,11 +789,13 @@ def scheduled_aggregate_weights():
     Scheduled task to aggregate weights every minute.
     """
     logging.info("Scheduled task: Starting weight aggregation process.")
+    db = SessionLocal()
     try:
-        asyncio.run(aggregate_weights())
+        asyncio.run(aggregate_weights_core(db))
     except Exception as e:
         logging.error(f"Error during scheduled weight aggregation: {e}")
-
+    finally:
+        db.close()
 scheduler.start()
 
 # if __name__ == "__main__":
