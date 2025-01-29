@@ -673,9 +673,10 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str, db: Session =
         # Check if the client exists in the database
         client = db.query(Client).filter(Client.client_id == client_id).first()
         if not client:
+            logging.warning(f"Client {client_id} not found in database. Closing WebSocket.")
             await websocket.close(code=1008, reason="Unauthorized")
-            logging.warning(f"Unauthorized access attempt by client {client_id}.")
             return
+        logging.info(f"Client {client_id} found in DB: {client}")
 
         # Add the client to the WebSocket manager and update status
         await manager.connect(client_id, websocket)
@@ -760,10 +761,14 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str, db: Session =
         for attempt in range(retry_attempts):
             try:
                 # Refresh the client object to avoid stale data
-                db.refresh(client)
-                client.status = "Inactive"
-                db.commit()
-                logging.info(f"Client {client_id} is now inactive. DB updated successfully.")
+                if client:  # Ensure client is valid before updating
+                    db.refresh(client)  # Refresh to prevent stale data
+                    client.status = "Inactive"
+                    db.commit()
+                    logging.info(f"Client {client_id} is now inactive. DB updated successfully.")
+                else:
+                    logging.warning(f"Skipping status update: Client {client_id} does not exist.")
+
                 break
             except SQLAlchemyError as db_error:
                 db.rollback()  # Added explicit rollback
