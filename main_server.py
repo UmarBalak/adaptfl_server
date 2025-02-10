@@ -788,7 +788,7 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str, db: Session =
 # Scheduler setup
 scheduler = BackgroundScheduler()
 
-@scheduler.scheduled_job(CronTrigger(minute="*/15"))
+@scheduler.scheduled_job(CronTrigger(hours="*/6"))
 def scheduled_aggregate_weights():
     """
     Scheduled task to aggregate weights every minute.

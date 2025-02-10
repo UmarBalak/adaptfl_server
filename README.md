@@ -22,7 +22,7 @@ The **AdaptFL Server** is a FastAPI-based backend that facilitates federated lea
 | **GET**  | `/get_latest_model`        | Download latest global model            |
 | **POST** | `/aggregate-weights`        | Aggregate weights & update global model |
 | **GET**  | `/get_data`          | Get detailed system information              |
-| **WS**   | `/ws/(client_id)` | WebSocket for model update alerts       |
+| **WS**   | `/ws/{client_id}` | WebSocket for model update alerts       |
 
 ## Workflow
 
