@@ -498,7 +498,7 @@ def add_laplace_noise(weights, epsilon, sensitivity):
     noise = np.random.laplace(0, sensitivity / epsilon, size=weights.shape)
     return weights + noise
 
-def federated_weighted_averaging_with_dp(weights_list, num_examples_list, loss_list, epsilon=0.1, sensitivity=1.0, alpha=0.7):
+def federated_weighted_averaging_with_dp(weights_list, num_examples_list, loss_list, epsilon=2.0, sensitivity=0.1, alpha=0.7):
     """Perform Weighted Federated Averaging with DP noise addition to the aggregated weights."""
     if not weights_list or not num_examples_list or not loss_list:
         logging.error("Missing inputs for aggregation.")
